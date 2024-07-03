@@ -1,3 +1,13 @@
+# Pict-Docker
+This repository adds a Dockerfile to Pict 4.1.
+
+```bash
+docker build . -t pict
+docker run -it pict
+```
+
+# Original text                             
+                            
                             **************
                             ***  PICT  ***
                             **************
