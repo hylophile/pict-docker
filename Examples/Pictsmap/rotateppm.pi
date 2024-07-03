@@ -1,0 +1,26 @@
+import "Std/Io"
+import "Contrib/Ppm"
+import "Posix/Args"
+
+if (<< args.argc 3) then
+  (error.fatal (+$ > "Usage: " (args.argv 0) " infile outfile"))
+else
+  [];
+
+val inname = (args.argv 1)
+val outname = (args.argv 2)
+
+type RGB = [Int Int Int]
+
+val f = (io.openRd inname exn.exit)
+val p = (ppm.parse f exn.exit \(r:Int g:Int b:Int):RGB = [r g b])
+(f.close);
+
+val [width height] = (array2.size p)
+val newp =
+  (array2.tabulate #RGB height width
+   \(x y) = (array2.nth p y (dec (- height x))))
+
+val o = (io.openWr outname exn.exit)
+(ppm.print o outname newp \(x:RGB):RGB = x true);
+(o.close);

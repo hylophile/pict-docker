@@ -1,0 +1,88 @@
+{- Eventually belongs in TD.pi -}
+
+{- This implementation probably conses more than it should.  The
+   advantage of doing this is that transmittion over the network
+   does not introduce extra buffering on IO streams. -}
+
+import "Contrib/TD"
+import "Std/Io"
+import "Contrib/Chun"
+import "Std/Bytes"
+
+{----------------------------------------------------------------------}
+
+def carg (#X1 #Y1 #R f:![X1 !R] c:![Y1 !X1]) : ![Y1 !R] =
+  \(y1) = (f (c y1))
+
+def rdTD (cm:Chun) : (TD Rd) =
+(val ochanTD = cm.ochanTD
+ val handlerOfStringTD = (ochanTD td.string)
+ val reqTD = (ochanTD (td.pair td.int (ochanTD td.bytes)))
+ val eofTD = (ochanTD (td.singleton (ochanTD td.bool)))
+ val readTD = (ochanTD (td.triple td.int handlerOfStringTD (ochanTD td.string)))
+ val readCharTD = (ochanTD (td.pair handlerOfStringTD (ochanTD td.char)))
+ val peekCharTD = readCharTD
+ val closeTD = (ochanTD (td.singleton (ochanTD td.unit)))
+ (record
+  marshall = \(str:Wr rd:Rd) = 
+   (def req (i) = 
+        (val buf = (makeByteArray '\000' i)
+         val n = (rd.readByteArray buf 0 i)
+         if (== n i) then buf 
+         else (val smallerbuf = (makeByteArray '\000' n)
+               (copyBytes buf 0 n smallerbuf 0);
+               smallerbuf))
+    (str.write "r");
+    (reqTD.marshall str req);
+    (eofTD.marshall str rd.eof);
+    (readTD.marshall str rd.read);
+    (readCharTD.marshall str rd.readChar);
+    (peekCharTD.marshall str rd.peekChar);
+    (closeTD.marshall str rd.close))
+
+  unmarshall = \(str:Rd fail:(Handler String)) = 
+   ((parseLiteralChar str 'r' fail);
+    val req = (reqTD.unmarshall str fail)
+    (record
+       eof = (eofTD.unmarshall str fail)
+       read = (readTD.unmarshall str fail)
+       readChar = (readCharTD.unmarshall str fail)
+       peekChar = (peekCharTD.unmarshall str fail)
+       readByteArray = 
+         \(buf from i) = 
+           (val b = (req i)
+            val lenb = (sizeByteArray b)
+            (copyBytes b 0 lenb buf from);
+            lenb)
+       close = (closeTD.unmarshall str fail)
+    ))))
+
+{----------------------------------------------------------------------}
+
+def wrTD (cm:ChunManager) : (TD Wr) =
+(val ochanTD = cm.ochanTD
+ val sendTD = (ochanTD (td.pair byteArrayTD (ochanTD td.unit)))
+ val closeTD = (ochanTD (td.singleton (ochanTD td.unit)))
+ (record
+  marshall = \(str:Wr wr:Wr) = 
+   (def send (b) = (wr.writeByteArray b 0 (sizeByteArray b))
+    (str.write "w");
+    (sendTD.marshall str send);
+    (closeTD.marshall str wr.close))
+  unmarshall = \(str:Rd fail:(Handler String)) = 
+   ((parseLiteralChar str 'w' fail);
+    val send = (sendTD.unmarshall str fail)
+    val close = (closeTD.unmarshall str fail)
+    (record
+       write = \(s) = (send (stringByteArray s))
+       writeChar = \(c) = (send (makeByteArray c 1))
+       writeSubstring = \(s i n) = 
+         (send (stringByteArray (subString s i n)))
+       writeByteArray = \(b i n) = 
+         (val sub = (makeByteArray '\000' (- n i))
+          (copyBytes b i n sub 0);
+          (send sub))
+       close = close
+    ))))
+
+

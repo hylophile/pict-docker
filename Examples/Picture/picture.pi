@@ -1,0 +1,176 @@
+{-
+ - PICTURE: A pi-calculus visualization tool
+ -}
+
+import "Std/List"
+import "Contrib/Clock"
+import "Picture/Picture"
+
+val pictureDebug = true
+inline def dbg (s) = if pictureDebug then (prNL s) else []
+
+{------------------------  Processes  ----------------------}
+
+type (Components X Proc) =
+  [Skip = ![!X]
+   In =   ![String String Proc !X]
+   RIn =  ![String String Proc !X]
+   Out =  ![String String !X]
+   Par =  ![Proc Proc !X]
+   New =  ![String Proc !X]]
+
+type Proc = (rec Proc = ![#X (Components X Proc) !X])
+
+val Skip : Proc =
+  (rec \(#X r):X = (r.Skip))
+
+def In (i:String s:String p:Proc) : Proc =
+  (rec \(#X r):X = (r.In i s p))
+
+def RIn (i:String s:String p:Proc) : Proc =
+  (rec \(#X r):X = (r.RIn i s p))
+
+def Out (i:String j:String) : Proc =
+  (rec \(#X r):X = (r.Out i j))
+
+def Par (p:Proc q:Proc) : Proc =
+  (rec \(#X r):X = (r.Par p q))
+
+def New (s:String p:Proc) : Proc =
+  (rec \(#X r):X = (r.New s p))
+
+def procString ((rec:Proc p)) : String =
+  (p [
+   Skip = \() = "()"
+   In = \(n s q) = (+$ > n "?" s " = " (procString q))
+   RIn = \(n s q) = (+$ > n "?*" s " = " (procString q))
+   Out = \(i j) = (+$ > i "!" j)
+   Par = \(p q) = (+$ > "(" (procString p) " | " (procString q) ")")
+   New = \(s q) = (+$ > "(new " s " " (procString q) ")")
+  ])
+
+{------------------------  Channels  ----------------------}
+
+type Chan = (rec C = [
+  In  = /[(Dict String C) String Proc Sig]
+  RIn = /[(Dict String C) String Proc Sig]
+  Out = /[C Sig]
+])
+
+type Closure = [Bool (Dict String Chan) String Proc]
+
+def Chan (s:String) : Chan = (
+  new lock : ^[(Queue Closure) (Queue Chan)]
+  run lock![(nil) (nil)]
+
+  val [blocked blockedWidget] = 
+    (queueWidget vertical flushLeft 
+     \([env p]) = (drawString (procString env p)))
+
+  val widget =
+    (fixWidth 80
+     (hList
+      (cons >
+       (picture vLine)
+       (vList
+	(cons >
+	 (rigidHeight(bg "Palegreen"(box center fill 1 (drawString s))))
+	 (picture hLine)
+	 blockedWidget
+	 (nil)))
+       (nil))))
+
+  run ((channels.enqueue widget); ())
+
+  (rec [
+   inp = \(env x p) = (
+     val [r w] = (read lock)
+     if (null w) then
+       (write lock [(addEndQueue [false env x p] r) w])
+     else
+       (val [y rest] = (firstQueue w)
+	(runQueue.enqueue (insertDict env x y) p);
+	(write lock [r rest]))
+   )
+   rinp = \(env x p) = (
+     val [r w] = (read lock)
+     if (null w) then
+       (write lock [(addEndQueue [true env x p] r) w])
+     else
+       (val [y rest] = (firstQueue w)
+	(runQueue.enqueue (insertDict env x y) p);
+	(write lock [(addEndQueue [true env x p] r) rest]))
+   )
+   out = \(y) = (
+     val [r w] = (read lock)
+     if (null r) then
+       (write lock [r (addEndQueue w y)])
+     else
+       (val [a@[repl env x p] rest] = (firstQueue r)
+	(runQueue.enqueue (insertDict env x y) p);
+	if repl then
+	  (write lock [(addEndQueue a rest) w])
+	else
+	  (write lock [rest w]))
+   )
+ ])
+)
+
+{------------------------  Scheduler  ----------------------}
+
+val [channels channelsWidget] =
+  (queueWidget horizontal flushLeft \((rec:Chan c)) = c.widget)
+
+val [runQueue runQueueWidget] =
+  (queueWidget vertical flushLeft \([env p]) = (drawString (procString p)))
+
+def runProc (env:(Dict String Chan) (rec:Proc p)) =
+  (p [
+   Skip = \() = []
+   In = \(x y q) = (val ch = (lookupDict env x) (ch.In y env q))
+   RIn = \(x y q) = (val ch = (lookupDict env x) (ch.RIn y env q))
+   Out = \(x y) = (val ch = (lookupDict env x) (ch.Out y))
+   Par = \(p q) = ((runQueue.enqueue env p); (runQueue.enqueue env q))
+   New = \(x q) = (runQueue.enqueue (insertDict env x (newChan s)) q)
+  ])
+
+def runNext [] = ((runClosure (runQueue.dequeue ignoreExn)); ())
+
+{------------------------  Testing  ----------------------}
+
+val test = (New "x" (Par (Out "x" "y") (RIn "x" "y" (Out "x" "y"))))
+def enq () = (run ((runQueue.enqueue (nil) test); ()) [])
+
+{------------------------  Display  ----------------------}
+
+val clock = (newClock)
+(clock.stop);
+run clock.everyTick![runNext]
+
+val clockbuttons = (clockController clock)
+
+val controlbuttons = (hList (quitButton) (button "Enqueue test proc") enq)
+
+val runQueueAssembly = 
+  (fixWidth 200 (vList
+    (cons >
+     (rigidHeight (bg "pink" (box center fill 1 (drawString "Run Queue"))))
+     (picture hLine)
+     runQueueWidget
+     (nil))
+  ))
+
+val queues =
+  (hList (cons > runQueueAssembly (picture vLine) channelsWidget (nil)))
+
+val buttons = 
+  (rigid (bg "yellow" (vList
+    (inMapList (cons > controlbuttons clockbuttons (nil))
+     \(w) = (box flushLeft fill 1 w))
+  )))
+
+val top =
+  (vList (cons > controlbuttons clockbuttons (picture hLine) queues (nil)))
+
+val root = (openServer "" "Picture" appDefaults)
+(buildWindow root "Pi-calculus visualization tool" top);

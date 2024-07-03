@@ -1,0 +1,185 @@
+{-
+ - Life simulation.
+ -}
+
+import "Posix/Args"
+import "Std/Array2"
+import "Contrib/Parse"
+import "Picture/Picture"
+
+val debugLife = false
+
+{- Get the board name and bitmap size from the command line -}
+val [boardName cellSize] =
+  if (== args.argc 3) then
+    [(args.argv 1)
+     (int.fromString (args.argv 2)
+      \_ = error.fail!"life: <board-name> <cell-size>")]
+  else if (== args.argc 2) then
+    (exn.try #String #[String Int]
+     \(h) = ["default" (int.fromString (args.argv 1) h)]
+     \(_) = [(args.argv 1) 10])
+  else
+    ["default" 10]
+
+{- Open the board file -}
+val g = (io.openRd (+$ "boards/" boardName) exn.exit)
+
+{- Parse the first line (to find the board width) -}
+val firstLine = (parse.line g)
+val boardW = (string.size firstLine)
+
+{- Parse the board positions into an array -}
+def parseRows (ls:(List String)):(Array String) =
+  ((parse.whitespace g);
+   val l = (parse.line g)
+   if (string.==$ l "") then
+     (array.fromList (list.rev ls))
+   else
+     if (== (string.size l) boardW) then
+       (parseRows (cons l ls))
+     else
+       (error.fatal "life: Non-rectangular board specification"))
+
+val lines = (parseRows (cons firstLine (nil)))
+val boardH = (array.size lines)
+(g.close);
+
+{------------------------- Display stuff ---------------------}
+
+val s = (picture.server "" "Life")
+val cellColor = (s.colorResource "Cell.fg" "green")
+val msgFont = (s.fontResource "Button.font" "8x13bold")
+
+val dead  = 0
+val alive = 1
+
+val newStatus = (array2.make dead boardW boardH)
+
+def initStatus (x:Int y:Int):Int =
+  (val ch = (string.nth (array.nth lines y) x)
+   if (== ch '#') then alive else dead)
+
+val oldStatus = (array2.tabulate boardW boardH initStatus)
+
+new writeCell:^[Int Int Int Sig]
+new getCell:^[Int Int !Int]
+new modifyCells:^Top
+
+def buttonPress [_:Top _:Top x:Int y:Int b:Button status:Int c:Sig] = (
+  run c![]
+  if (xlib.eqButton b xlib.button1) then (
+    (array2.unsafeUpdate newStatus x y alive);
+    (array2.unsafeUpdate oldStatus x y alive);
+    (writeCell x y alive);
+    ()
+  ) else (
+    (array2.unsafeUpdate newStatus x y dead);
+    (array2.unsafeUpdate oldStatus x y dead);
+    (writeCell x y dead);
+    ()
+  )
+)
+
+def drawCell (d:Display win:Window gc:GC x:Int y:Int cellx:Int celly:Int cellw:Int cellh:Int changed:Bool status:Int):[] =
+  if (== status alive) then
+    ((xlib.setForeground d gc cellColor);
+     (xlib.fillRectangle d win gc (inc x) (inc y) (- cellw 2) (- cellh 2)))
+  else if changed then
+    (xlib.clearArea d win x y cellw cellh false)
+  else []
+
+def checkCell (newStatus:(Array Int) oldStatus:(Array Int)):[] =
+  \(x y myStatus) = (
+    val left  = (mod (+ x (dec boardW)) boardW)
+    val right = (mod (inc x) boardW)
+    val above = (mod (+ y (dec boardH)) boardH)
+    val below = (mod (inc y) boardH)
+
+    val neighbours =
+      (+ >
+       (array2.unsafeNth oldStatus left  above)
+       (array2.unsafeNth oldStatus x     above)
+       (array2.unsafeNth oldStatus right above)
+       (array2.unsafeNth oldStatus left  y    )
+       (array2.unsafeNth oldStatus right y    )
+       (array2.unsafeNth oldStatus left  below)
+       (array2.unsafeNth oldStatus x     below)
+       (array2.unsafeNth oldStatus right below))
+
+    if (== myStatus alive) then
+      if (|| (== neighbours 2) (== neighbours 3)) then
+	(array2.unsafeUpdate newStatus x y alive)
+      else
+	((array2.unsafeUpdate newStatus x y dead); (writeCell x y dead))
+    else
+      if (== neighbours 3) then
+	((array2.unsafeUpdate newStatus x y alive); (writeCell x y alive))
+      else
+	(array2.unsafeUpdate newStatus x y dead)
+    {-
+      if myStatus == alive || neighbours >> 0 then
+	pr["Cell [" +$ intString[x] +$ "," +$ intString[y] +$ "]\n"];
+	pr[" myStatus "]; prInt[myStatus];
+	pr[" oldStatus "]; prInt[nthArray2[oldStatus,x,y]];
+	pr[" newStatus "]; prInt[nthArray2[newStatus,x,y]];
+	pr["\nleft "]; prInt[left]; pr[" right "]; prInt[right];
+	pr[" above "]; prInt[above]; pr[" below "]; prInt[below];
+	pr["\n neighbours "]; prInt[neighbours]; nl[]
+      else []
+     -}
+  )
+
+new lock:^Top
+new status:^Top
+new setStatus:^Top
+
+def simulate [newStatus oldStatus] = lock?[] = (
+  (array2.apply oldStatus (checkCell newStatus oldStatus));
+  (lock![] | simulate![oldStatus newStatus])
+)
+
+run simulate![newStatus oldStatus]
+
+val startMessage = "Click here to start"
+val stopMessage = "Click here to stop"
+
+def mouse [_ _ _ _ c] = status?running =
+  if running then
+    lock?[] = ((setStatus startMessage); (c![] | status!false))
+  else
+    ((setStatus stopMessage); (c![] | lock![] | status!true))
+    
+def quit [c] = (
+  (debug debugLife "life.quit (no status)");
+  status?running =
+  if running then
+    lock?[] = ((debug debugLife "life.quit (status)"); c![])
+  else
+    ((debug debugLife "life.quit (status)"); c![])
+)
+  
+run status!false
+
+val startStop =
+  (font msgFont
+   (divertButtonPress mouse
+    (box.center
+     (drawStringRef startMessage (yes startMessage) setStatus))))
+
+val board =
+  (grid boardW boardH cellSize cellSize initStatus writeCell 
+   modifyCells getCell drawCell buttonPress quit)
+
+val life = (vList
+  (cons >
+   (picture.picture picture.hLine)
+   (hList (cons >
+	   startStop (picture.picture picture.vLine)
+	   (box.center (quitButton)) (nil)))
+   (picture.picture picture.hLine)
+   (box.box basic.center basic.center 5 board)
+   (nil))
+)
+
+(top.buildWindow root (+$ > "Life (" boardName ")") life);

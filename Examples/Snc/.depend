@@ -1,0 +1,6 @@
+IOTD IOTD.px : IOTD.pi ../../Lib/lib.px ../../Lib/Contrib/TD.px ../../Lib/Std/Io.px ../../Lib/Contrib/Chun.px ../../Lib/Std/Bytes.px 
+Lazy Lazy.px : Lazy.pi ../../Lib/lib.px 
+Remote Remote.px : Remote.pi ../../Lib/lib.px ../../Lib/Contrib/TD.px ../../Lib/Contrib/Chun.px ../../Lib/Posix/Args.px ../../Lib/Posix/Proc.px ../../Lib/Posix/Env.px 
+snc snc.px : snc.pi ../../Lib/lib.px ../../Lib/Std/Io.px ../../Lib/Std/MD5.px ../../Lib/Posix/File.px ../../Lib/Posix/Fd.px ../../Lib/Posix/Args.px ../../Lib/Posix/Stat.px ../../Lib/Posix/Env.px ./Remote.px ./IOTD.px ./Lazy.px 
+testremote testremote.px : testremote.pi ../../Lib/lib.px ../../Lib/Contrib/Chun.px ./Remote.px 
+testtrace testtrace.px : testtrace.pi ../../Lib/lib.px ../../Lib/Std/Io.px 

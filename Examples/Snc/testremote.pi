@@ -1,0 +1,33 @@
+import "Contrib/Chun"
+import "Remote"
+
+val [intOpts _ unitOpts rem] =
+  (getOpts
+   (cons ["port" "p"] (nil))
+   (nil)
+   (cons > ["server" "s"] (nil))
+   exitOnExn)
+
+val port = (try \(h) = (intOpts "port" h) \(_) = (+ userReservedPort 500))
+val hostname = if (null rem) then "localhost" else (car rem)
+val server = (unitOpts "server")
+
+run if server then
+ (def body (cm:ChunManager) =
+    [intTD intTD 
+     \(x:Int) : Int =
+      ((prNL (+$ > "server received " (intString x) " from client"));
+       (* x 2))]
+  becomeServer![body exitOnExn]
+ )
+else
+  (val cm = (chunServer port exitOnExn)
+   val f = (startRemoteServer intTD intTD cm
+            hostname "pict/HardHat/Snc/testremote"
+            exitOnExn)
+   (prNL "Sending 3 to server");
+   (prNL (intString (f 3)));
+   (prNL "Sending 5 to server");
+   (prNL (intString (f 5)));
+   (prNL "Finished");
+   ())

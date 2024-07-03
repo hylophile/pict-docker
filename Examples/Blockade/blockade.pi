@@ -1,0 +1,365 @@
+import "Std/Io"
+import "Std/Ref"
+import "Posix/Args"
+import "Contrib/CQueue"
+import "Contrib/Chun"
+import "Picture/Picture"
+
+{-----------------------------------------------------------------------}
+{- Global definitions -}
+
+val width = 5
+val height = 5
+val cellSize = 50
+
+val emptyCell = 0
+val blockedCell = 1
+val playerACell = 2
+val playerBCell = 3
+
+{-----------------------------------------------------------------------}
+{- Display handling -}
+
+val s = (picture.server "" "Blockade")
+
+val playerAColorName = "red"
+val playerBColorName = "blue"
+
+val white = (s.newColor "white" exn.exit)
+val gray = (s.newColor "gray" exn.exit)
+val playerAColor = (s.newColor playerAColorName exn.exit)
+val playerBColor = (s.newColor playerBColorName exn.exit)
+val black = (s.newColor "black" exn.exit)
+
+val boardColors = (array.make white 4)
+(array.update boardColors emptyCell white);
+(array.update boardColors blockedCell black);
+(array.update boardColors playerACell playerAColor);
+(array.update boardColors playerBCell playerBColor);
+
+{-----------------------------------------------------------------------}
+{- Game management -}
+
+def newGame
+  [resetPIA:/[//[/[/[/[Int Int]] /[]]]] resetPIB:/[//[/[/[/[Int Int]] /[]]]]
+   resetBoardA:/[Sig] resetBoardB:/[Sig]
+   sayA:/String sayB:/String updateCell:/[Int Int Int]] = 
+ ({- the board has an invisible layer of blocks as sentinels -}
+  val board = (array2.make emptyCell (+ width 2) (+ height 2))
+
+  (int.for 0 (inc width)
+    \(i) =
+      ((array2.update board 0 i blockedCell);
+       (array2.update board i 0 blockedCell);
+       (array2.update board (inc width) i blockedCell);
+       (array2.update board i (inc height) blockedCell)));
+    
+  def contents (x:Int y:Int):Int = (array2.nth board (inc x) (inc y))
+
+  def update ([x:Int y:Int] cell:Int):[] = 
+   (run updateCell![x y cell]
+    (array2.update board (inc x) (inc y) cell))
+  
+  {- turns consists of two parts; exit on reset only -}
+
+  def turn[activate:/[/[/[/[Int Int]] /[]]]
+           [xActive yActive] 
+           [xPassive yPassive] 
+           sayActive:/String sayPassive:/String
+           activeCell passiveCell 
+           nextTurn] =
+     (val [getClick noMoreClick] = (activate)
+        
+      def getBlock () = 
+       (val [x y] = (getClick)
+        if (== (contents x y) emptyCell)
+          then [x y] else 
+            (run sayActive!"Illegal move; click to block an empty cell"
+             (getBlock)))
+
+      def getMove () = 
+       (val [x y] = (getClick)
+        val dx = (int.abs (- x xActive))
+        val dy = (int.abs (- y yActive))
+        val valid = (&& > (<= dx 1) (<= dy 1) (<= 1 (+ dx dy))
+                     (== (contents x y) emptyCell))
+        if valid then [x y] else 
+          (run sayActive!"Illegal move; click to move to an adjacent, empty cell"
+           (getMove)))
+
+      run sayActive!"Click to block a cell"
+      (update (getBlock) blockedCell);
+
+      run sayActive!"Choose an adjacent cell to move your piece"
+      val [xNew yNew] = (getMove)
+      (update [xActive yActive] emptyCell);
+      (update [xNew yNew] activeCell);
+
+      run noMoreClick![]
+
+      if
+	(|| >
+	 (== (contents (dec xPassive) (dec yPassive)) emptyCell)
+	 (== (contents (dec xPassive)        yPassive) emptyCell)
+	 (== (contents (dec xPassive) (inc yPassive)) emptyCell)
+	 (== (contents xPassive        (dec yPassive)) emptyCell)
+	 (== (contents xPassive        (inc yPassive)) emptyCell)
+	 (== (contents (inc xPassive) (dec yPassive)) emptyCell)
+	 (== (contents (inc xPassive)        yPassive) emptyCell)
+	 (== (contents (inc xPassive) (inc yPassive)) emptyCell) )
+      then
+        ( sayActive!" "
+        | nextTurn![[xPassive yPassive] [xNew yNew]])
+      else
+        ( sayActive!"You win the game!"
+        | sayPassive!"You have lost the game")
+    )
+
+  run sayA!" "
+  run sayB!" "
+  (resetBoardA);
+  (resetBoardB);
+  val activateA = (resetPIA)
+  val activateB = (resetPIB)
+
+  def turnA[posA posB] = turn![activateA posA posB sayA sayB 
+                               playerACell playerBCell turnB]
+  and turnB[posB posA] = turn![activateB posB posA sayB sayA 
+                               playerBCell playerACell turnA]
+  val startA = [1 1]
+  val startB = [(- width 2) (- height 2)]
+
+  (update startA playerACell);
+  (update startB playerBCell);
+  turnA![startA startB]
+ )
+
+{-----------------------------------------------------------------------}
+
+{- States of the click manager: 
+      A[nil]     active with no clicks waiting
+      A[x@@t]    active with some clicks waiting
+      I          inactive
+
+Transitions:
+  reset   activate        next    deactivate      -- sent by GM
+  click -- sent by display
+
+Reset returns new activate handler
+activate returns new next and deactivate handlers and allocates a new
+   queue of waiting clicks
+
+State machine:
+  state         reset   activate   next            deactivate    click
+  ----- 
+  A[nil]        I       N/A        A[nil] (wait)   I             A[[x y]]]
+  A[c@@t]       I       N/A        A[t]            I (and beep)  A[c@@t@@[x y]]
+  I             I       A[nil]     N/A             N/A           I (and beep)
+-}
+
+def clickManager(say) = 
+ (def defaultHandler (_) = (run say!["Not your turn!"]  [])
+  new lock:^Top
+  run lock!defaultHandler
+  def setHandler [h c] =
+    lock?_ =
+    (lock!h | c![])
+  [
+   click = \[_ _ x y b _ c] = lock?h = ((h [x y]); (lock!h | c![]))
+   reset = \() = 
+    ((setHandler defaultHandler);
+     def activate() = 
+       (val q = (emptyCQueue)
+        def deactivate[] =
+          ((setHandler defaultHandler);
+           if (not (q.isEmpty)) then
+             say!["Too many clicks"]
+           else ())
+        (setHandler q.insertHd);
+        [q.removeTlBlocking deactivate])
+     activate)
+  ])
+
+
+{-----------------------------------------------------------------------}
+
+type PIargs = [String String /[]]
+type NextClick =  /[Int Int]
+type Activate = / /[/[/[NextClick] /[]]]
+type PIresult =  [/[String] /[Sig] /[Int Int Int] /[Activate]]
+
+type PI       =  /[PIargs /PIresult]
+
+def playerInterface
+  (name:String myColorName:String resetEvents:![]) : PIresult
+ = 
+ (new setStatus:^Top
+  def say[s] = ((setStatus s); ())
+
+  val cm = (clickManager say)
+
+  new writeCell:^Top
+  new getCell:^Top
+  new modifyCells:^Top
+  new quitBoard:^Top
+
+  def updateCell [x y newContents] =
+    ((writeCell x y newContents); ())
+
+  def resetBoard () = 
+    (int.for 0 (dec width) \(x) =
+     (int.for 0 (dec height) \(y) =
+      (writeCell x y emptyCell)))
+
+  def drawCell (d w gc x y cellx celly cellw cellh 
+                changed status) = 
+    ((xlib.setForeground d gc (array.nth boardColors status));
+     (xlib.fillRectangle d w gc (inc x) (inc y) (- cellw 2) (- cellh 2)))
+
+  val boardGrid = (grid width height cellSize cellSize
+                   \(x y)=emptyCell 
+                   writeCell modifyCells getCell drawCell 
+                   cm.click 
+                   \a = quitBoard!a)
+  val board = 
+    (box.box basic.center basic.center 30 boardGrid)
+
+  val status = 
+    (bg (s.newColor myColorName exn.exit)
+     (box.box basic.center basic.fill 1     
+      (font (s.fontResource "MediumBold.font" "")
+       (drawStringRef "Click Help or Reset to begin" 
+        (yes "Illegal move; click to move to an adjacent, empty cell") 
+        setStatus))))
+
+  val helpWidget =
+   (quitReqOnClick 
+    (font (resourcemanager.fontResource root "Small.font" "")
+     (bg (root.newColor "yellow" exn.exit)
+     (vList
+      (cons >
+       (bg (root.newColor "red" exn.exit)
+        (box.box basic.center basic.rigid 5 (textWidget "LargeBold" "Blockade")))
+       (picture.picture picture.hLine)
+       (box.box basic.center basic.rigid 5
+        (textWidget "SmallBold" 
+         "Written in PICT by Cedric Fournet and Benjamin Pierce"))
+       (picture.picture picture.hLine)
+       (box.box basic.center basic.center 20
+        (vList (list.map
+         (cons > "Press Reset at any time to start a new game."
+          "Each player's turn consists of two clicks.  The first"
+          "blocks a free cell anywhere on the board; the second"
+          "moves the player's piece to any adjacent cell.  The game"
+          "ends when a player cannot make a next move."
+          (nil))
+        stringWidget)))
+       (picture.picture picture.hLine)
+       (box.box basic.center basic.rigid 5 (textWidget "SmallBold" "Click to dismiss"))
+       (nil))))))
+
+  val helpButton =
+    (button "Help" \(_ _) = (top.buildWindow root "Blockade help" helpWidget))
+
+  val vspace = (spacerWidget 2 2 2 2 0 3)
+  val hspace = (spacerWidget 2 2 7 7 10 0)
+
+  val controlbuttons =
+    (box.box basic.center basic.fill 1 
+        (hList (cons >
+		(button "Quit" \(_ _) = (error.exit 0))
+		hspace
+                (button "Reset" \(_ _) = (run resetEvents![] []))
+		hspace
+                helpButton
+                (nil))))
+
+  val topw = 
+   (bg gray
+    (vList (cons > vspace controlbuttons vspace board vspace status (nil))))
+
+  (top.buildWindow root (+$ > "   Blockade: Player " name "   ") topw);
+
+  [say resetBoard updateCell cm.reset]
+ )
+
+{-----------------------------------------------------------------------}
+
+def oneNodeGame [] = 
+ (new resetHandler:^[]
+  val [sayA resetBoardA updateCellA resetPIA] = 
+    (playerInterface "A" playerAColorName resetHandler)
+  val [sayB resetBoardB updateCellB resetPIB] = 
+    (playerInterface "B" playerBColorName resetHandler)
+
+  def updateCell args = (updateCellA!args | updateCellB!args)
+
+  forward![resetHandler \[] = 
+    newGame![resetPIA resetPIB resetBoardA resetBoardB sayA sayB updateCell]
+  ])
+
+{-----------------------------------------------------------------------}
+
+val pncd =
+  (td.pair (chun.rchan (td.singleton (chun.rchan (td.pair td.int td.int))))
+   (chun.rchan td.unit))
+
+val activateTD = (chun.rchan (chun.rchan (td.singleton (chun.rchan pncd))))
+  
+val piResTD =
+  (td.quad (chun.rchan (td.singleton td.string))
+   (chun.rchan (td.singleton (chun.rchan td.unit)))
+   (chun.rchan (td.triple td.int td.int td.int))
+   (chun.rchan (td.singleton activateTD)))
+  
+val interfaceTD =
+  (td.pair td.string td.string (chun.ochan td.unit) (chun.rchan piResTD))
+
+def blockadeClient chun:Chun =
+  cm.register![playerInterface interfaceTD "playerInterface"]
+
+def blockadeServer chun:Chun =
+ (val otherPlayerInterface = (chun.lookup interfaceTD "playerInterface")
+
+  new resetHandler:^[]
+  val [sayA resetBoardA updateCellA resetPIA] = 
+    (playerInterface "A" playerAColorName resetHandler)
+  val [sayB resetBoardB updateCellB resetPIB] = 
+    (otherPlayerInterface "B" playerBColorName resetHandler)
+    
+  def updateCell args = (updateCellA!args | updateCellB!args)
+    
+  forward![resetHandler \[] = 
+    newGame![resetPIA resetPIB resetBoardA resetBoardB sayA sayB updateCell]
+  ])
+
+
+{-----------------------------------------------------------------------}
+
+val [intOpts _ unitOpts rem] =
+  (args.getOpts
+   (cons ["port" "p"] (nil))
+   (nil)
+   (cons > ["onenode" "o"] ["client" "c"] ["server" "s"] (nil))
+   exn.exit)
+
+val name = (args.argv 0)
+val port = (try \(h) = (intOpts "port" h) \(_) = (+ sockets.userReservedPort 500))
+val hostname = if (null rem) then "localhost" else (car rem)
+val onenode = (unitOpts "onenode")
+val client = (unitOpts "client")
+val server = (unitOpts "server")
+
+run
+if (&& > server (not client) (not onenode)) then
+  ((prNL (+$ name ": server started\n"));
+   (prNL (+$ > "Now do '" name " -client'"
+	  "  or  '" name " -client <hostname>'"
+	  "  to start client"));
+   blockadeServer!(chunServer port exn.exit))
+else if (&& > onenode (not server) (not client)) then 
+  oneNodeGame![]
+else if (&& > client (not server) (not onenode)) then 
+  blockadeClient!(chunClient [hostname port] exn.exit)
+else 
+  error.fail!(+$ > "usage: " name " [ -onenode | -client | -server ]")

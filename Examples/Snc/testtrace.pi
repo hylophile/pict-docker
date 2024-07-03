@@ -1,0 +1,12 @@
+import "Std/Io"
+
+val stdout = (fdWr stdOutFd)
+val stderr = (fdWr stdErrFd)
+val w = (traceWr stdout "OUT" stderr)
+
+(w.write "hello");
+(w.write " there");
+(w.write "\n");
+(w.close);
+
+

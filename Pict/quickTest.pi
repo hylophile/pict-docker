@@ -1,0 +1,10 @@
+
+import "lib"
+
+now (set showInter)
+now (set showOccur)
+
+def c[] = d![]
+and d[] = c![]
+
+run c![]

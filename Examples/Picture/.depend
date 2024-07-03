@@ -1,0 +1,1 @@
+picture picture.px : picture.pi ../../Lib/lib.px ../../Lib/Std/List.px ../../Lib/Contrib/Clock.px ../../Lib/Picture/Picture.px 

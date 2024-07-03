@@ -1,0 +1,551 @@
+#{#}
+
+%{
+open Error
+open Syntax
+
+let static = ref ([] : string list)
+let includes = ref ([] : string list)
+
+let codeInfo fi alloc purity =
+  match purity.v with
+    "C" ->
+      {Ccode.alloc = alloc.v; Ccode.const = true;
+       Ccode.reader = false; Ccode.writer = false;
+       Ccode.kind = Ccode.EXP}
+  | "P" ->
+      {Ccode.alloc = alloc.v; Ccode.const = false;
+       Ccode.reader = false; Ccode.writer = false;
+       Ccode.kind = Ccode.EXP}
+  | "R" ->
+      {Ccode.alloc = alloc.v; Ccode.const = false;
+       Ccode.reader = true; Ccode.writer = false;
+       Ccode.kind = Ccode.EXP}
+  | "W" ->
+      {Ccode.alloc = alloc.v; Ccode.const = false;
+       Ccode.reader = true; Ccode.writer = true;
+       Ccode.kind = Ccode.EXP}
+  | "E" ->
+      {Ccode.alloc = alloc.v; Ccode.const = false;
+       Ccode.reader = true; Ccode.writer = true;
+       Ccode.kind = Ccode.STATEMENT}
+  | _ ->
+      Error.errAt fi ("Bad argument to C code: " ^ purity.v)
+
+let ccode fi alloc purity code l =
+  let code = code.v in
+  let size = String.length code in
+  let isHash x = x < size && String.get code x = '#' in
+  let rec scan start x =
+    if x < size then
+      match (isHash x, isHash (x+1)) with
+        (true,true) ->
+          (match scan (x+2) (x+2) with [] -> Error.bug "Parser.ccode"
+           | (s :: l) -> (String.sub code start (1+x-start) ^ s) :: l)
+      | (true,false) -> String.sub code start (x-start) :: scan (x+1) (x+1)
+      | (_,_) -> scan start (x+1)
+    else
+      [String.sub code start (size-start)]
+  in let sl = scan 0 0 in
+  if List.length sl <> List.length l + 1 then
+    Error.errAt fi "Wrong number of arguments in ccode"
+  else
+    match purity.v with
+      "I" ->
+        (match sl with [c] -> includes := c :: !includes; RECORDv(fi,[])
+         | _ -> Error.errAt fi "Included C code cannot have any arguments")
+    | "S" ->
+        (match sl with [c] -> static := c :: !static; RECORDv(fi,[])
+         | _ -> Error.errAt fi "Static C code cannot have any arguments")
+    | _ ->
+        CCODEv(fi,codeInfo fi alloc purity,sl,l)
+
+let ccall fi alloc purity code l =
+   CCALLv(fi,codeInfo fi alloc purity,code.v,l)
+
+%}
+
+%token <Error.info> AND
+%token <Error.info> RARROW
+%token <Error.info> AT
+%token <Error.info> BACKSLASH
+%token <Error.info> BANG
+%token <Error.info> BAR
+%token <Error.info> BOOL
+%token <Error.info> BOT
+%token <Error.info> CARET
+%token <Error.info> CCALL
+%token <Error.info> CCODE
+%token <Error.info> CHAR
+%token <char Error.withinfo> CHARV
+%token <Error.info> COLON
+%token <Error.info> CON
+%token <Error.info> DEF
+%token <Error.info> DOT
+%token <Error.info> ELSE
+%token <Error.info> EOF
+%token <Error.info> EQ
+%token <Error.info> FALSE
+%token <Error.info> GT
+%token <Error.info> HASH
+%token <Error.info> INT
+%token <int Error.withinfo> INTV
+%token <string Error.withinfo> ID
+%token <Error.info> IF
+%token <Error.info> IMPORT
+%token <Error.info> INLINE
+%token <Error.info> KTYPE
+%token <Error.info> LCURLY
+%token <Error.info> LPAREN
+%token <Error.info> LSQUARE
+%token <Error.info> LT
+%token <Error.info> NEG
+%token <Error.info> NEW
+%token <Error.info> NOW
+%token <Error.info> POS
+%token <Error.info> QM
+%token <Error.info> RCURLY
+%token <Error.info> REC
+%token <Error.info> RPAREN
+%token <Error.info> RSQUARE
+%token <Error.info> RUN
+%token <Error.info> SEMI
+%token <Error.info> SLASH
+%token <Error.info> STRING
+%token <string Error.withinfo> STRINGV
+%token <Error.info> THEN
+%token <Error.info> TOP
+%token <Error.info> TRUE
+%token <Error.info> TYPE
+%token <Error.info> USCORE
+%token <Error.info> VAL
+%token <Error.info> WHERE
+%token <Error.info> WITH
+
+%start toplevel
+%type <Syntax.toplevel> toplevel
+
+%%
+#{@}
+
+\subsection{Compilation units}
+
+\finish{Perhaps put all the core language forms first?}
+
+\begin{syntax}
+TopLevel & $=$ & \REP{Import} \REP{Dec} &E& {\rm Compilation unit} \\
+Import & $=$ & @import@ String &E& {\rm Import statement} \\
+\end{syntax}
+
+#{#}
+toplevel :
+  Imports DecSeq EOF {
+    let top =
+      {imports = $1; static = List.rev !static;
+       includes = List.rev !includes; dec = $2}
+    in
+      static := []; includes := []; top
+  }
+;
+Imports :
+  IMPORT STRINGV Imports { ($1,$2.v) :: $3 }
+|                        {              [] }
+;
+#{@}
+
+\subsection{Declarations}
+
+\begin{syntax}
+Dec & $=$ &
+   @new@ Id @:@ Type &C& {\rm Channel creation} \\
+&& @val@ Pat @=@ Val &D& {\rm Value binding} \\
+&& @run@ Proc &D& {\rm Parallel process} \\
+&& Val @;@ &D& {\rm Sequential execution} \\
+&& @inline@ @def@ Id Abs &D& {\rm Inlinable definition} \\
+&& @def@ Id$_1$ Abs$_1$ @and ... and@ Id$_n$ Abs$_n$ 
+                &C& {\rm Recursive definition ($n\geq 1)$} \\
+&& @type@ Id @=@ Type &D& {\rm Type abbreviation} \\
+&& @type@ @(@ Id \REPN{KindedPolarityId} @)@ @=@ Type
+     &D& {\rm Type operator abbrev} $(n \geq 1)$ \\
+&& @now@ @(@ Id \REP{Flag} @)@ &E& {\rm Compiler directive} \\
+\end{syntax}
+
+\begin{syntax}
+Flag & $=$ &
+   Id     &E& {\rm Ordinary flag} \\
+&& Int    &E& {\rm Numeric flag} \\
+&& String &E& {\rm String flag} 
+\end{syntax}
+
+#{#}
+Dec :
+  DEF DefList                    {                         DEF($1,$2) }
+| INLINE DEF ID Abs              {      INLINE($1,$3.v,fst $4,snd $4) }
+| NEW ID COLON Type              {                    NEW($1,$2.v,$4) }
+| VAL Pat EQ Val                 {                      VAL($3,$2,$4) }
+| Val SEMI                       {          VAL($2,RECORDp($2,[]),$1) }
+| RUN Proc                       {                         RUN($1,$2) }
+| NOW LPAREN ID StringSeq RPAREN { Flags.doCmd $1 $3.v $4; DEF($1,[]) }
+| TYPE ID EQ Type
+    { VAL($1,RECORDp($1,[TYp($1,$2.v,EQ $4)]),
+          RECORDv($1,[TYv($1,$4)])) }
+| TYPE LPAREN ID KindedPolarityIdSeq RPAREN EQ Type
+    { VAL($1,RECORDp($1,[TYp($1,$3.v,EQ(CON($1,$4,$7)))]),
+          RECORDv($1,[TYv($1,CON($1,$4,$7))])) }
+;
+DecSeq :
+  Dec DecSeq { SEQ(decInfo $2,$1,$2) }
+|            { DEF(Error.unknown,[]) }
+;
+RType :
+  COLON Type { Some $2 }
+|            { None }
+;
+OptKind :
+  COLON Kind {        $2 }
+|            { Kind.TYPE }
+;
+DefList :
+  ID Abs AND DefList { ($1.i,$1.v,fst $2,snd $2) :: $4 }
+| ID Abs             {     [($1.i,$1.v,fst $2,snd $2)] }
+;
+StringSeq :
+  ID StringSeq      {                  $1.v :: $2 }
+| INTV StringSeq    {    string_of_int $1.v :: $2 }
+| STRINGV StringSeq {                  $1.v :: $2 }
+|                   {                          [] }
+;
+KindedPolarityIdSeq :
+  KindedPolarityId KindedPolarityIdSeq { $1 :: $2 }
+| KindedPolarityId                     { [$1] }
+;
+#{@}
+
+\subsection{Abstractions}
+
+\begin{syntax}
+Abs & $=$ &
+   Pat @=@ Proc &C& {\rm Process abstraction} \\
+&& @(@ \REP{Label FieldPat} @)@ RType @=@ Val &D& {\rm Value abstraction} 
+\end{syntax}
+
+#{#}
+Abs :
+  Pat EQ Proc { ($1,$3) }
+| LPAREN FieldPatSeq RPAREN EQ Val
+  { RECORDp($4,$2 @ [ANONp($4,VARp($4,"_res_",None))]),
+    OUTPUT($4,VARv($4,"_res_"),$5) }
+| LPAREN FieldPatSeq RPAREN COLON Type EQ Val
+  { RECORDp($4,$2 @ [ANONp($4,VARp($4,"_res_",Some(RCHAN($4,$5))))]),
+    OUTPUT($6,VARv($6,"_res_"),$7) }
+;
+#{@}
+
+\subsection{Patterns}
+
+\begin{syntax}
+Pat & $=$ &
+   Id RType                      &C& {\rm Variable pattern} \\
+&& @[@ \REP{Label FieldPat} @]@  &C& {\rm Record pattern} \\
+&& @(@ @rec@ RType Pat @)@       &C& {\rm Rectype pattern} \\
+&& @_@ RType                     &C& {\rm Wildcard pattern} \\
+&& Id RType @@@@ Pat             &C& {\rm Layered pattern}
+\end{syntax}
+
+\begin{syntax}
+FieldPat & $=$ &
+   Pat            &C& {\rm Value field} \\
+&& @#@ Id Constr  &C& {\rm Type field}
+\end{syntax}
+
+#{#}
+Pat :
+  USCORE RType                {         WILDp($1,$2) }
+| ID RType                    {   VARp($1.i,$1.v,$2) }
+| ID RType AT Pat             {   ASp($3,$1.v,$2,$4) }
+| LSQUARE FieldPatSeq RSQUARE {       RECORDp($1,$2) }
+| LPAREN REC RType Pat RPAREN {       RECp($1,$3,$4) }
+| LPAREN CON RType Pat RPAREN {       CONp($2,$3,$4) }
+;
+FieldPatSeq :
+  Pat FieldPatSeq            { ANONp(patInfo $1,$1) :: $2 }
+| ID EQ Pat FieldPatSeq      { LABELEDp($2,$1.v,$3) :: $4 }
+| ID EQ HASH ID Constr FieldPatSeq 
+  { Error.errAt $2 "labeled type fields not yet implemented" }
+| HASH ID Constr FieldPatSeq {      TYp($1,$2.v,$3) :: $4 }
+|                             {                         [] }
+;
+#{@}
+
+\subsection{Type constraints}
+
+\begin{syntax}
+Constr & $=$ &
+\emptything{empty}  &D& {\rm No constraint} \\
+&& @<@ Type         &C& {\rm Subtype constraint} \\
+&& @:@ Kind         &C& {\rm Kinding constraint} \\
+&& @=@ Type         &C& {\rm Equality constraint}
+\end{syntax}
+
+#{#}
+Constr :
+  LT Type  {                 LT $2 }
+| COLON Kind {               IN $2 }
+| EQ Type  {                 EQ $2 }
+|          { LT(TOP Error.unknown) }
+;
+#{@}
+
+\subsection{Processes}
+
+\begin{syntax}
+Proc & $=$ &
+   Val @!@ Val                  &C& {\rm Output atom} \\
+&& Val @?@ Abs                  &C& {\rm Input prefix} \\
+&& @( )@                        &C& {\rm Null process} \\
+&& @(@ Proc$_1$ @| ... |@ Proc$_n$ @)@   
+                                &C& {\rm Parallel composition} $(n \geq 2)$ \\
+&& @(@ \REPN{Dec} Proc @)@      &C& {\rm Local declarations} $(n \geq 1)$\\
+&& @if@ Val\/ @then@ Proc @else@ Proc &C& {\rm Conditional}
+\end{syntax}
+
+#{#}
+Proc :
+  Val BANG Val               {           OUTPUT($2,$1,$3) }
+| Val QM Abs                 { INPUT($2,$1,fst $3,snd $3) }
+| LPAREN DecProc RPAREN      {                         $2 }
+| LPAREN ParProc RPAREN      {                         $2 }
+| LPAREN RPAREN              {                    SKIP $1 }
+| IF Val THEN Proc ELSE Proc {            IF($1,$2,$4,$6) }
+;
+DecProc :
+  Dec DecProc { LET(decInfo $1,$1,$2) }
+| Dec Proc    { LET(decInfo $1,$1,$2) }
+;
+ParProc :
+  Proc BAR ParProc { PRL($2,$1,$3) }
+| Proc BAR Proc    { PRL($2,$1,$3) }
+;
+#{@}
+
+\subsection{Values}
+
+\finish{Phil objected strongly to the use of the word "value" for
+expressions that were not irreducible.}
+
+\begin{syntax}
+Val & $=$ &
+   Const &C& {\rm Constant}\\ 
+&& Path &C& {\rm Path} \\
+&& @\@ Abs &D& {\rm Process abstraction} \\
+&& @[@ \REP{Label FieldVal} @]@ &C& {\rm Record} \\
+&& @if@ RType Val\/ @then@ Val\/ @else@ Val &D& {\rm Conditional} \\
+&& @(@ Val\/ RType @with@ \REP{Label FieldVal} @)@ &D& {\rm Field extension} \\
+&& @(@ Val\/ RType @where@ \REP{Label FieldVal} @)@ &D& {\rm Field override} \\
+&& @(@ RType Val \REP{Label FieldVal} @)@ &D& {\rm Application} \\
+&& @(@ Val @>@ \REPN{Val} @)@ &D& {\rm Right-assoc application} $(n \geq 2)$ \\
+&& @(@ Val @<@ \REPN{Val} @)@ &D& {\rm Left-assoc application} $(n \geq 2)$ \\
+&& @(@ @rec@ RType Val @)@ &C& {\rm Rectype value} \\
+&& @(@ \REPN{Dec} Val @)@ &D& {\rm Local declarations} $(n\geq 1)$ \\ 
+&& @(@ @ccode@ Int Id String \REP{FieldVal} @)@ &E& {\rm Inline C code} 
+\end{syntax}
+
+\begin{syntax}
+Path & $=$ &
+   Id            &C& {\rm Variable} \\
+&& Path @.@ Id   &C& {\rm Record field projection}
+\end{syntax}
+
+\begin{syntax}
+FieldVal & $=$ &
+   Val                         &C& {\rm Value field} \\
+&& @#@ Type                    &C& {\rm Type field} 
+\end{syntax}
+
+\begin{syntax}
+Const & $=$ & 
+   String &C& {\rm String constant} \\
+&& Char &C& {\rm Character constant} \\
+&& Int &C& {\rm Integer constant} \\
+&& @true@ &C& {\rm Boolean constant} \\
+&& @false@ &C& {\rm Boolean constant}
+\end{syntax}
+
+#{#}
+Val :
+  Path                                            {                       $1 }
+| CHARV                                           {         CHARv($1.i,$1.v) }
+| STRINGV                                         {       STRINGv($1.i,$1.v) }
+| INTV                                            {          INTv($1.i,$1.v) }
+| TRUE                                            {           BOOLv($1,true) }
+| FALSE                                           {          BOOLv($1,false) }
+| LPAREN Val FieldValSeq RPAREN                   {      APPv($1,None,$2,$3) }
+| LPAREN COLON Type Val FieldValSeq RPAREN        {   APPv($1,Some $3,$4,$5) }
+| LPAREN Val LT ArgsL RPAREN                      {                    $4 $2 }
+| LPAREN Val GT ArgsR RPAREN                      {                    $4 $2 }
+| LPAREN Val RType WITH FieldValSeq RPAREN        {       WITHv($4,$3,$2,$5) }
+| LPAREN Val RType WHERE FieldValSeq RPAREN       {      WHEREv($4,$3,$2,$5) }
+| LPAREN REC RType Val RPAREN                     {           RECv($2,$4,$3) }
+| LPAREN CON RType Val RPAREN                     {           CONv($2,$3,$4) }
+| LPAREN DecVal RPAREN                            {                       $2 }
+| LSQUARE FieldValSeq RSQUARE                     {           RECORDv($1,$2) }
+| IF Val THEN Val ELSE Val                        {    IFv($1,None,$2,$4,$6) }
+| IF COLON Type Val THEN Val ELSE Val             { IFv($1,Some $3,$4,$6,$8) }
+| LPAREN CCODE INTV ID STRINGV FieldValSeq RPAREN {     ccode $1 $3 $4 $5 $6 }
+| LPAREN CCALL INTV ID STRINGV FieldValSeq RPAREN {     ccall $1 $3 $4 $5 $6 }
+| BACKSLASH Abs                                   {   ABSv($1,fst $2,snd $2) }
+;
+Path :
+  ID          {     VARv($1.i,$1.v) }
+| Path DOT ID { SELECTv($2,$1,$3.v) }
+;
+DecVal :
+  Dec DecVal { LETv(decInfo $1,$1,$2) }
+| Dec Val    { LETv(decInfo $1,$1,$2) }
+;
+ArgsL :
+  ArgsL Val { let v = $2 and a = $1 and i = valInfo $2 in
+              fun f -> APPv(i,None,f,[ANONv(i,a f); ANONv(i,v)]) }
+| Val       { let v = $1 in fun _ -> v }
+;
+ArgsR :
+  Val ArgsR { let v = $1 and a = $2 and i = valInfo $1 in
+              fun f -> APPv(i,None,f,[ANONv(i,v); ANONv(i,a f)]) }
+| Val       { let v = $1 in fun _ -> v }
+;
+FieldValSeq :
+  Val FieldValSeq       { ANONv(valInfo $1,$1) :: $2 }
+| ID EQ Val FieldValSeq { LABELEDv($2,$1.v,$3) :: $4 }
+| HASH Type FieldValSeq {           TYv($1,$2) :: $3 }
+| ID EQ HASH Type FieldValSeq {
+    Error.errAt $2 "Labeled type fields no implemented yet"
+  }
+|                       {                         [] }
+;
+#{@}
+
+\subsection{Types}
+
+\begin{syntax}
+Type & $=$ &
+   @Top@                                &C& {\rm Top type} \\
+&& Id                                   &C& {\rm Type identifier} \\
+&& @^@ Type                             &C& {\rm Input/output channel} \\
+&& @!@ Type                             &C& {\rm Output channel} \\
+&& @/@ Type                             &C& {\rm Responsive output channel} \\
+&& @?@ Type                             &C& {\rm Input channel} \\
+&& @Int@                                &C& {\rm Integer type} \\
+&& @Char@                               &C& {\rm Character type} \\
+&& @Bool@                               &C& {\rm Boolean type} \\
+&& @String@                             &C& {\rm String type} \\
+&& @[@ \REP{Label FieldType} @]@              &C& {\rm Record type} \\
+&& @(@ Type @with@ \REP{Label FieldType} @)@  &D& {\rm Record extension} \\
+&& @(@ Type @where@ \REP{Label FieldType} @)@ &D& {\rm Record field override}\\
+&& @\@ \REPN{KindedPolarityId} @=@ Type         &C& {\rm Type operator} $(n\geq 1)$ \\
+&& @(@ Type \REPN{Type} @)@             &C& {\rm Type application} $(n\geq 1)$\\
+&& @( rec@ KindedId @=@ Type @)@         &C& {\rm Recursive type}
+\end{syntax}
+
+\begin{syntax}
+FieldType & $=$ &
+   Type          &C& {\rm Value field} \\
+&& @#@ Id Constr &C& {\rm Type field}
+\end{syntax}
+
+\begin{syntax}
+   RType & $=$ & 
+\emptything{empty}  &R& {\rm Omitted type annotation} \\
+&& @:@ Type         &C& {\rm Explicit type annotation} 
+\end{syntax}
+
+#{#}
+Type :
+  TOP                                   {            TOP($1) }
+| BOT                                   {            BOT($1) }
+| ID                                   {    TVAR($1.i,$1.v) }
+| CARET Type                            {        CHAN($1,$2) }
+| BANG Type                             {       OCHAN($1,$2) }
+| SLASH Type                            {       RCHAN($1,$2) }
+| QM Type                               {       ICHAN($1,$2) }
+| INT                                   {            INT($1) }
+| CHAR                                  {           CHAR($1) }
+| BOOL                                  {           BOOL($1) }
+| STRING                                {         STRING($1) }
+| LSQUARE FieldTypeSeq RSQUARE          {      RECORD($1,$2) }
+| LPAREN Type WITH FieldTypeSeq RPAREN  {     WITH($1,$2,$4) }
+| LPAREN Type WHERE FieldTypeSeq RPAREN {    WHERE($1,$2,$4) }
+| BACKSLASH KindedPolarityIdSeq EQ Type         {      CON($1,$2,$4) }
+| LPAREN Type TypeSeq RPAREN            {     TAPP($1,$2,$3) }
+| LPAREN REC ID OptKind EQ Type RPAREN { REC($1,$3.v,$4,$6) }
+;
+TypeSeq :
+  Type TypeSeq { $1 :: $2 }
+| Type         {     [$1] }
+;
+FieldTypeSeq :
+  Type FieldTypeSeq            { ANON(typeInfo $1,$1) :: $2 }
+| ID EQ Type FieldTypeSeq      {  LABELED($2,$1.v,$3) :: $4 }
+| HASH ID Constr FieldTypeSeq {       TY($1,$2.v,$3) :: $4 }
+| ID EQ HASH ID Constr FieldTypeSeq
+  { Error.errAt $2 "Labeled type fields not implemented yet" }
+|                             {                         [] }
+;
+#{@}
+
+\subsection{Polarities}
+
+\begin{syntax}
+Polarity & $=$ &
+   \emptything{empty} &C& {\rm Mixed polarity} \\
+&& @Pos@              &C& {\rm Positive polarity} \\
+&& @Neg@              &C& {\rm Negative polarity} \\
+&& @Con@              &C& {\rm Constant polarity}
+\end{syntax}
+
+#{#}
+Polarity :
+      { Kind.PN  }
+| POS { Kind.POS }
+| NEG { Kind.NEG }
+| CON { Kind.CON }
+;
+#{@}
+
+\subsection{Kinds}
+
+\begin{syntax}
+Kind & $=$ &
+   @(@ \REPN{Polarity Kind} @->@ Kind @)@ &C& {\rm Operator kind} $(n\geq 1)$ \\
+&& @Type@                                 &C& {\rm Type kind}
+\end{syntax}
+
+\begin{syntax}
+KindedPolarityId & $=$ & Id @:@ Polarity Kind &C& {\rm Explicitly-kinded identifier} \\
+&& Id &D& {\rm Implicitly-kinded identifier}
+\end{syntax}
+
+#{#}
+Kind :
+  LPAREN PolarityKindSeq RARROW Kind RPAREN { Kind.ARROW($2,$4) }
+| KTYPE                                     {         Kind.TYPE }
+;
+PolarityKindSeq :
+  Polarity Kind PolarityKindSeq { ($1,$2) :: $3 }
+| Polarity Kind                 {     [($1,$2)] }
+;
+#{@}
+\subsection{Labels}
+
+\begin{syntax}
+   Label & $=$ & 
+   \emptything{empty}  &C& {\rm Anonymous label} \\
+&& Id @=@              &C& {\rm Explicit label} 
+\end{syntax}
+
+#{#}
+KindedPolarityId :
+  ID COLON Polarity Kind { ($1.v,$3,$4)             }
+| ID                     { ($1.v,Kind.PN,Kind.TYPE) }
+;
+
+%%

@@ -1,0 +1,8 @@
+{- Lazy (evaluate on demand) data structures -}
+
+type (Lazy X) = [get = ![/X]]
+
+def lazy (#X delayed:![/X]) : (Lazy X) = 
+  (new get:^[/X]
+   run get?[r] = (val v = (delayed) (r!v | forward![get \():X = v]))
+  [get=get])

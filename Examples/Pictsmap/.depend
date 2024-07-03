@@ -1,0 +1,4 @@
+binarizeppm binarizeppm.px : binarizeppm.pi ../../Lib/lib.px ../../Lib/Std/Io.px ../../Lib/Contrib/Ppm.px ../../Lib/Posix/Args.px 
+doubleppm doubleppm.px : doubleppm.pi ../../Lib/lib.px ../../Lib/Std/Io.px ../../Lib/Contrib/Ppm.px ../../Lib/Posix/Args.px 
+pictsmap pictsmap.px : pictsmap.pi ../../Lib/lib.px ../../Lib/Std/Io.px ../../Lib/Contrib/Ppm.px ../../Lib/Std/Ref.px ../../Lib/Posix/Args.px ../../Lib/Picture/Picture.px 
+rotateppm rotateppm.px : rotateppm.pi ../../Lib/lib.px ../../Lib/Std/Io.px ../../Lib/Contrib/Ppm.px ../../Lib/Posix/Args.px 

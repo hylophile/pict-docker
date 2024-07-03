@@ -1,0 +1,98 @@
+{-
+ - Bouncing boxes, in a resizable widget.
+ -}
+
+import "Picture/Picture"
+
+now (setHeapSize 512)
+
+val s = (picture.server "" "Bouncy")
+val ballColor = (s.colorResource "Ball.fg" "red")
+val sz = (s.intResource "BallSize" 10)
+val width = (s.intResource "Width" 300)
+val height = (s.intResource "Height" 300)
+
+{-
+ - Clears the trailing edges of a box. This is much better than erasing
+ - the whole box and then redrawing, since there is no flicker.
+ -}
+def clearEdges (d:Display w:Window x:Int y:Int dx:Int dy:Int):[] =
+  if (&& (>> dx 0) (>> dy 0)) then
+    ((xlib.clearArea d w x y dx sz false);
+     (xlib.clearArea d w x y sz dy false))
+  else if (>> dx 0) then
+    ((xlib.clearArea d w x y dx sz false);
+     (xlib.clearArea d w x (+ > y dy sz) sz (neg dy) false))
+  else if (>> dy 0) then
+    ((xlib.clearArea d w (+ > x dx sz) y (neg dx) sz false);
+     (xlib.clearArea d w x y sz dy false))
+  else
+    ((xlib.clearArea d w (+ > x dx sz) y (neg dx) sz false);
+     (xlib.clearArea d w x (+ > y dy sz) sz (neg dy) false))
+    
+{-
+ - Each bouncing box is one of these processes. Each box acquires the lock
+ - until it has finished all drawing operations. This means that when the
+ - widgets quits, all boxes stop bouncing.
+ -}
+def bounce [lock:^[display=Display window=Window w=Int h=Int] x:Int y:Int dx:Int dy:Int] = lock?s =
+  (val xlimit = (- s.w sz)
+   val ylimit = (- s.h sz)
+   if (|| (>> x xlimit) (>> y ylimit)) then
+     ((xlib.clearArea s.display s.window x y sz sz false);
+      (lock!s | bounce![lock (min x xlimit) (min y ylimit) dx dy]))
+   else
+     (val newx = (+ x dx)
+      val newy = (+ y dy)
+      val xWrong = (|| (<< newx 0) (>> newx xlimit))
+      val yWrong = (|| (<< newy 0) (>> newy ylimit))
+      if (&& xWrong yWrong) then
+	(lock!s | bounce![lock x y (neg dx) (neg dy)])
+      else if xWrong then
+	(lock!s | bounce![lock x y (neg dx) dy])
+      else if yWrong then
+	(lock!s | bounce![lock x y dx (neg dy)])
+      else
+	((s.useGc \(gc) =
+	  ((xlib.setForeground s.display gc ballColor);
+	   (clearEdges s.display s.window x y dx dy);
+	   (xlib.fillRectangle s.display s.window gc newx newy sz sz))
+	  );
+	 (lock!s | bounce![lock newx newy dx dy]))))
+
+val bouncy : Widget =
+  (class.instance
+   (def handler (#S<WidgetState s:S lock:^S x y b) =
+      if (xlib.eqButton b xlib.button1) then
+        (run bounce![lock x y -3 -5] s)
+      else if (xlib.eqButton b xlib.button2) then
+        (run bounce![lock x y 4 -2] s)
+      else if (xlib.eqButton b xlib.button3) then
+        (run bounce![lock x y 2 2] s)
+      else
+        s
+
+    def realize (#X<WidgetState s:WidgetState lock:^X) : WidgetState =
+       (run bounce![lock 5 5 2 2] s)
+
+    (class.clickable handler
+     (class.fixedBounds [sz sz width height 0 0]
+      (class.extendState realize
+       class.root)))))
+
+val topLevel = (vList
+  (cons >
+   (box.rigidHeight (vList
+     (cons >
+      (box.center
+       (textWidget "SmallBold" "Use the mouse buttons to bounce a ball"))
+      (picture.picture picture.hLine)
+      (box.center (quitButton))
+      (picture.picture picture.hLine)
+      (nil))
+   ))
+   bouncy
+   (nil))
+)
+
+(top.buildWindow root "Bouncy" topLevel);

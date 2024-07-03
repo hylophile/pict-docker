@@ -1,0 +1,13 @@
+/.cvsignore/1.1/Thu Sep 12 17:38:09 1996//
+/.depend/1.11/Tue Nov 26 17:25:35 1996//
+/Makefile/1.6/Mon Dec 16 14:52:31 1996//
+/broadcast.ok/1.1.1.1/Thu Nov 30 13:20:11 1995//
+/semaphore.ok/1.1/Thu May 30 10:39:42 1996//
+/simple.ok/1.1.1.1/Thu Nov 30 13:20:11 1995//
+/sync.ok/1.1.1.1/Thu Nov 30 13:20:10 1995//
+/torus.ok/1.1/Thu Feb 22 12:34:17 1996//
+/torus.pi/1.16/Wed Nov 20 14:05:56 1996//
+/broadcast.pi/1.19/Thu Jun 19 20:49:46 1997//
+/semaphore.pi/1.9/Thu Jun 19 20:47:59 1997//
+/simple.pi/1.15/Thu Jun 19 20:47:59 1997//
+/sync.pi/1.14/Thu Jun 19 20:47:59 1997//

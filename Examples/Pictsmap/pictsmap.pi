@@ -1,0 +1,272 @@
+{-
+ - pixmap (ppm) editor
+ -}
+
+import "Std/Io"
+import "Contrib/Ppm"
+import "Std/Ref"
+import "Posix/Args"
+import "Picture/Picture"
+
+{-
+ - Open a connection to the server.
+ -}
+
+val s = (picture.server "" "Pictsmap")
+
+{-
+ - Load colors.
+ -}
+
+val white = (s.newColor "White" (exn.fail "Could not allocate color"))
+val black = (s.newColor "Black" (exn.fail "Could not allocate color"))
+
+val gridColor =
+  (s.newColorRGB 50000 50000 50000 (exn.fail "Could not allocate color"))
+
+{-
+ - A status display widget.
+ -}
+
+new setStatus:^[String Sig]
+val status = (picture.stringRef "     " setStatus)
+
+{-
+ - The array of pixels and the sample pixmap.
+ -}
+
+val title = (ref.make "needs initialized")
+
+def loadPixels () : [String (Array2 Color)] =
+  if (<< args.argc 2) then
+    ((setStatus "New file"); ["untitled.ppm" (array2.make white 16 16)])
+  else
+    (val title = (args.argv 1)
+     (exn.try #String #[String (Array2 Color)]
+      \(fail) =
+        (val pixmap =
+	   (ppm.parse (io.openRd title fail) fail \(r:Int g:Int b:Int):Color =
+	    (s.newColorRGB r g b
+              \_ = fail!"Could not allocate color"))
+	 (setStatus (+$ > "Loaded '" title "'"));
+	 [title pixmap])
+      \(_) =
+	[title (array2.make white 16 16)]
+     ))
+
+def saveFile ():[] = []
+{-
+
+  (try
+   \(fail) =
+     (val f = (openWr (deref title) fail)
+      (printPpm f (deref title) (pixels.deref)
+       \(c) = [(colorRed c) (colorGreen c) (colorBlue c)] true); 
+      (f.close);
+      (setStatus ("Wrote " +$ (deref title))))
+   \(s) =
+     (setStatus s))
+-}
+
+{-
+ - This array associates each mouse button with a color.  It is modified
+ - when the user clicks in a paintpot, and looked up when the user clicks
+ - in the drawing region.
+ -}
+
+val buttonColors = (array.make black 3)
+
+{-
+ - This grid provides an actual-size mirror of the drawing region.
+ -}
+
+new updatePixmap:^Top
+
+def initPixmap (_:Int _:Int):Color = white
+
+def drawPixmap (d:Display win:Window gc:GC x:Int y:Int w:Int h:Int color:Color):[] =
+  ((xlib.setForeground d gc color); (xlib.fillRectangle d win gc x y w h))
+
+val pixmap =
+  (box.box basic.center basic.fill 1
+   (grid 15 15 1 1 initPixmap updatePixmap (chan)
+    (chan) drawPixmap \(_ _ _ _ _ _) = [] \() = []))
+
+{-
+ - We build a grid of pixels.  Clicking on a grid element changes its color.
+ - We mirror changes here on 'pixmap'.
+ -}
+
+new updatePixel:^Top
+
+def initPixel (_:Int _:Int):Color = white
+
+def drawPixel (d win gc x y _ _ w h _ color) =
+  ((xlib.setForeground d gc gridColor);
+   (xlib.drawRectangle d win gc x y (dec w) (dec h));
+   (xlib.setForeground d gc color);
+   (xlib.fillRectangle d win gc (inc x) (inc y) (- w 2) (- h 2)))
+
+def handleInputInPixel (_ _ x y b _) =
+  if (xlib.eqButton b xlib.button1) then
+    (val color = (array.nth buttonColors 0)
+     run ((updatePixel x y color); (updatePixmap x y color); ())
+     [])
+  else if (xlib.eqButton b xlib.button2) then
+    (val color = (array.nth buttonColors 1)
+     run ((updatePixel x y color); (updatePixmap x y color); ())
+     [])
+  else if (xlib.eqButton b xlib.button3) then
+    (val color = (array.nth buttonColors 2)
+     run ((updatePixel x y color); (updatePixmap x y color); ())
+     [])
+  else
+    []
+
+val pixels =
+  (box.box basic.center basic.fill 1
+   (grid 15 15 15 15 initPixel updatePixel (chan)
+    (chan) drawPixel handleInputInPixel \() = []))
+
+{-
+ - We build a row of 'paintpots'.  Clicking with button 'b' in a paintpot
+ - causes 'b' to remapped to the color of the paintpot.
+ -}
+
+val colors =
+  (cons > "Black" "Gray50" "Gray70" "Gray90" "White" "Brown"
+   "Tan2" "Indian Red" "Orange" "Dark Orange" "Goldenrod1"
+   "Yellow" "Green" "Green4" "Aquamarine2" "Blue2"
+   "RoyalBlue4" "Purple3" "Orchid2" (nil))
+
+def initPaintpot (x _) =
+  (val name = (list.nth colors x)
+   [name (server.newColor name exitOnExn)])
+
+def drawPaintpot (d win gc x y _ _ w h _ [_ color]) =
+  ((xlib.setForeground d gc gridColor);
+   (xlib.drawRectangle d win gc x y (dec w) (dec h));
+   (xlib.setForeground d gc color);
+   (xlib.fillRectangle d win gc (inc x) (inc y) (- w 2) (- h 2)))
+
+def handleInputInPaintpot (_ _ _ _ b [name color]) =
+  if (xlib.eqButton b xlib.button1) then
+    ((array.update buttonColors 0 color);
+     (setStatus (+$ "Button 1 set to " name)))
+  else if (xlib.eqButton b xlib.button2) then
+    ((array.update buttonColors 1 color);
+     (setStatus (+$ "Button 2 set to " name)))
+  else if (xlib.eqButton b xlib.button3) then
+    ((array.update buttonColors 2 color);
+     (setStatus (+$ "Button 3 set to " name)))
+  else
+    []
+
+val paintpots =
+  (box.box basic.center basic.fill 1
+   (grid (list.size colors) 1 15 15 initPaintpot (chan) (chan)
+    (chan) drawPaintpot handleInputInPaintpot \() = []))
+
+{-----------------------------------------------------------------------}
+{- Set up the editor with a particular array of colors -}
+
+{-
+def installPixels (name:String p:(Array2 Color)) =
+  (val [w h] = (array2.size p)
+   new c1  new c2
+   val natsize = (min 20 (min (900/w) (700/h)))
+   (pixelsChanges.set c1);
+   (pixmapChanges.set c2);
+   (newPixels (drawArray2 p [1 1 natsize natsize 0 0] paintColor  
+	       handleInputInPixels (pixelsChanges.deref) 4 gridColor));
+   (pixels.set p);
+   {- We should really free the old one first -}
+   (pixmap.set
+    (xCreatePixmap server.display server.window w h 
+     (xDefaultDepth server.display server.screen)));
+   (inApplyArray2 (pixels.deref) setPixmapEntry);
+   (newPixmaps (drawPixmap (pixmap.deref) (pixmapChanges.deref)));
+   (set title name))
+-}
+
+{-
+ - Picture transformations
+ -}
+
+def rotateRight ():[] = []
+{-
+  (val [width height] = (array2.size (pixels.deref))
+   val newp = (array2.tabulate height width  
+               \(x y) = (array2.nth (pixels.deref) y (height-1-x)))
+   (c![] | ((installPixels (deref title) newp); ())))
+-}
+
+def rotateLeft ():[] = []
+{-
+  (val [width height] = (array2.size (pixels.deref))
+   val newp = (array2.tabulate height width  
+               \(x y) = (array2.nth (pixels.deref) (width-1-y) x))
+   (c![] | ((installPixels (deref title) newp); ())))
+-}
+
+def move (dx:Int dy:Int):/[Sig] = \() = []
+{-
+  \() = ((shiftArray2 (pixels.deref) dx dy); (updatePixels (pixels.deref)))
+-}
+
+def resize (dw:Int dh:Int):/[Sig] = \() = []
+{-
+  (val [width height] = (array2.size (pixels.deref))
+   val newwidth = (max 1 (width+dw))
+   val newheight = (max 1 (height+dh))
+   val newp = 
+     (array2.tabulate newwidth newheight 
+      \(x y) = if ((x << width) && (y << height)) then
+                 (array2.nth (pixels.deref) x y) 
+               else
+                 white)
+   (c![] | ((installPixels (deref title) newp); ())))
+-}
+
+def clear ():[] = []
+{-
+  ((resetArray2 (pixels.deref) white){-; (updatePixels (pixels.deref))-})
+-}
+
+{-
+ - The top-level user-interface.
+ -}
+
+val controlButtons =
+  (picture.beside > picture.quitButton (button "Save" saveFile))
+
+val shiftButtons =
+  (picture.beside >
+   (button "SpinR" rotateRight)
+   (button "SpinL" rotateLeft) 
+   (button "Up" (move 0 1))
+   (button "Down" (move 0 -1))
+   (button "Left" (move 1 0))
+   (button "Right" (move -1 0))
+   (button "Clear" clear))
+
+val resizeButtons =
+  (picture.beside >
+   (button "Taller" (resize 0 1))
+   (button "Shorter" (resize 0 -1))
+   (button "Narrower" (resize -1 0))
+   (button "Wider" (resize 1 0)))
+
+val pictsmap =
+  (picture.above >
+   controlButtons
+   paintpots
+   resizeButtons
+   pixels
+   shiftButtons
+   status
+   pixmap)
+
+(top.buildWindow server "Pictsmap" pictsmap);
+val [name p] = (loadPixels)
+{-(installPixels name p);-}

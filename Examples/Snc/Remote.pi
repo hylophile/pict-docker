@@ -1,0 +1,64 @@
+{- Support for remote execution of Pict code -}
+
+{- REMEMBER TO REMOVE DEBUGGING INDIRECTION FROM RSH COMMAND -}
+
+import "Contrib/TD"
+import "Contrib/Chun"
+import "Posix/Args"
+import "Posix/Proc"
+import "Posix/Env"
+
+{- To set up a remotely-executable piece of code, write
+   two separate Pict programs:
+     - server, which calls  remoteServer  to establish its willingness
+       to execute a particular piece of code on behalf of clients
+     - client, which calls  remoteClient  to establish a connection
+       with the server
+   (both must first establish a connection with a nameserver)
+-}
+
+def uniqueNetworkName () : String =
+  (+$ > (env.get "HOSTNAME" exn.exit) "-" (proc.pidString (proc.getpid)))
+
+def becomeServer
+  [#X #Y
+   body: ![Chun ![(TD X) (TD Y) ![X !Y]]]
+   fail:(Handler String)]
+=
+{- Parses the command line to find out the location of a name server
+   and a name to use for its service, creates a chunnel running the
+   given handler, and registers it with this name. -}
+  (val args = (cdr (list.tabulate (dec args.argc) \(x:Int):String = (args.argv (inc x))))
+   val nshost = (car args)
+   val nsport = (int.toString (car (cdr args)) exn.exit)
+   val name = (car (cdr (cdr args)))
+   val cm = (chunClient [nshost nsport] exn.exit)
+   val [argTD resTD handler] = (body cm)
+   val f = (cm.funChun handler argTD resTD)
+   (prNL ((+$)> "server started"));
+   cm.register![f name]
+)
+
+def startRemoteServer
+  (#X #Y argTD:(TD X) resTD:(TD Y) cm:ChunManager
+   host:String server:String 
+   fail:(Handler String))
+  : ![X !Y] 
+=
+{- Uses rsh to start a copy of SERVER running on HOST, tells it to 
+   connect to the same nameserver as CM, and gives it a fresh name
+   under which to publish its service.   Returns a function for
+   accessing the service. -}
+ (val [nshost nsport] = cm.nsAddress
+  val name = (uniqueNetworkName)
+  val child = (exec "/usr/bin/rsh" 
+               (cons > "/usr/bin/rsh" host server "-server"
+                       nshost (intString nsport) name
+                       ">" 
+                       (+$ > "/tmp/" "server." (intString (getpid)))
+                       (nil)))
+  run (val status = (waitpid child)
+       (prNL (+$ > "(server " server " finished)")); 
+       ())
+  val f = (cm.lookup (pairTD argTD (chunTD resTD)) name)
+  (cm.chunFun f resTD))

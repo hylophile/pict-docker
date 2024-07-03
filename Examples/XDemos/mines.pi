@@ -1,0 +1,190 @@
+{-
+ - Minesweeper game
+ -}
+
+import "Std/Array"
+import "Std/Array2"
+import "Std/Random"
+import "Posix/Time"
+import "Picture/Picture"
+
+val s = (picture.server "" "Minesweeper")
+
+val sz = 18
+val gap = 2
+val red = (s.colorResource "coveredMine" "DarkRed")
+val green = (s.colorResource "safeSquare" "Green")
+
+val font =
+  (s.fontResource "font"
+   "-*-times-medium-r-normal--14-140-75-75-p-74-iso8859-1")
+val largeBold =
+  (s.fontResource "largeBold"
+   "-*-times-bold-r-normal--24-240-75-75-p-132-iso8859-1")
+val smallBold =
+  (s.fontResource "smallBold"
+   "-*-times-bold-r-normal--14-140-75-75-p-77-iso8859-1")
+
+val color = (s.colorResource "Board.fg" "black")
+val boardW = (s.intResource "Board.width" 20)
+val boardH = (s.intResource "Board.height" 20)
+val mineFrequency = (s.intResource "Mine.frequency" 5)
+
+new setStatus:^[String Sig]
+new update:^[Int Int (Array2 Picture) Sig]
+
+val covered        = 0
+val uncovered      = 1
+val marked         = 2
+val finished       = 3
+val finishedMarked = 4
+
+{-
+ - Board components
+ -}
+
+val emptyP = (picture.fg green (picture.fillRect 0 0 18 18))
+val markedP = (picture.add (picture.line 0 0 18 18) (picture.line 0 18 18 0))
+val mineP = (picture.add emptyP (picture.fillEllipse 9 9 17 17))
+val markedMineP = (picture.add mineP markedP)
+val coveredP = (picture.fg red (picture.fillRect 0 0 18 18))
+val uncoveredP =
+  (array.tabulate #Picture 9
+   \(x) = (picture.add emptyP (picture.text ($$ x))))
+
+{-
+ - Seed the random number generator using the current time.
+ -}
+
+val t = (time.localTime)
+(random.randomize (+ (* t.minutes 19) t.seconds));
+
+{-
+ - Build the initial board.
+ -}
+
+type Cell = [Int Bool]
+
+def initCell (_:Int _:Int):Cell =
+  [covered (== (random.randomInt mineFrequency) 1)]
+
+val board = (array2.tabulate #Cell boardW boardH initCell)
+val display = (array2.tabulate #Picture boardW boardH \(_ _) = coveredP)
+
+{-
+ - Reset the board for a new .
+ -}
+
+def resetCell (_:Int _:Int _:Cell):Cell =
+  [covered (== (random.randomInt mineFrequency) 1)]
+
+def newGame ():[] =
+  ((array2.map board resetCell);
+   (array2.map #Picture display \(_ _ _) = coveredP);
+   (setStatus "Click on a cell");
+   (update sz gap display))
+
+{-
+ - Calculate the number of mines in neighbouring cells.
+ -}
+
+def neighbours (cellx:Int celly:Int):Int =
+  (def contents (dx:Int dy:Int):Int =
+     if (|| (<< (+ cellx dx) 0) (>= (+ cellx dx) boardW)) then 0
+     else if (|| (<< (+ celly dy) 0) (>= (+ celly dy) boardH)) then 0
+     else if (snd (array2.nth board (+ cellx dx) (+ celly dy))) then 1
+     else 0
+   (+ > (contents -1 -1) (contents 0 -1) (contents 1 -1)
+    (contents -1 0) (contents 0 0) (contents 1 0)
+    (contents -1 1) (contents 0 1) (contents 1 1)))
+
+def uncover (x:Int y:Int):[] =
+  if (== x boardW) then
+    (uncover 0 (inc y))
+  else if (<< y boardH) then
+    (val [status mined] = (array2.nth board x y)
+     if (== status marked) then
+       ((array2.update board x y [finishedMarked mined]);
+	if mined then (array2.update display x y markedMineP)
+	else (array2.update display x y markedP);
+	(uncover (inc x) y))
+     else
+       ((array2.update board x y [finished mined]);
+	if mined then (array2.update display x y mineP)
+	else (array2.update display x y emptyP);
+	(uncover (inc x) y)))
+  else
+    []
+  
+def floodFill (x:Int y:Int first:Bool):[] =
+  if (&& > (>= x 0) (<< x boardW) (>= y 0) (<< y boardH)) then
+    (val [status mined] = (array2.nth board x y)
+     val n = (neighbours x y)
+     if (|| (== status covered) (== status marked)) then
+       if (== n 0) then
+	 ((array2.update board x y [uncovered mined]);
+ 	  (array2.update display x y emptyP);
+	  (floodFill (dec x) (dec y) false); (floodFill x (dec y) false);
+	  (floodFill (inc x) (dec y) false); (floodFill (dec x) y false);
+	  (floodFill (inc x) y false); (floodFill (dec x) (inc y) false);
+	  (floodFill x (inc y) false); (floodFill(inc x) (inc y) false))
+       else if (&& first mined) then
+	 ((uncover 0 0); (setStatus "Game over"))
+       else
+	 ((array2.update board x y [uncovered mined]);
+ 	  (array2.update display x y (array.nth uncoveredP n)))
+     else
+       [])
+  else
+    []
+
+def markCell (x:Int y:Int):[] =
+  (val [status mined] = (array2.nth board x y)
+   if (== status marked) then
+     ((array2.update board x y [covered mined]);
+      (array2.update display x y coveredP);
+      (update sz gap display))
+   else if (== status covered) then
+     ((array2.update board x y [marked mined]);
+      (array2.update display x y markedP);
+      (update sz gap display))
+   else
+     [])
+  
+def button (b:Button down:Bool f:Int g:Int h:Int i:Int):[] =
+  (val ax = (div (* f boardW) g)
+   val ay = (div (* h boardH) i)
+   if (&& down (xlib.eqButton b xlib.button1)) then
+    ((floodFill ax ay true); (update sz gap display))
+  else
+    (markCell ax ay))
+
+{- Needs to get back nice centering -}
+
+val help =
+  (picture.northwest
+   (picture.quitOnHit
+    (picture.font font
+     (picture.above >
+      (picture.font largeBold (picture.text "Minesweeper"))
+      picture.hLine
+      (picture.font smallBold
+       (picture.text "Written in Pict by David Turner and Benjamin Pierce"))
+      picture.hLine
+      (picture.text "mouse left = step on a cell")
+      (picture.text "mouse middle = mark a cell as dangerous")
+      (picture.text "mouse right = cheat; step gently on a cell")
+      picture.hLine
+      (picture.text "Click to dismiss")))))
+
+{- Need to center buttons and status -}
+
+(s.open "Minesweeper"
+ (picture.northwest
+  (picture.above >
+   (picture.beside >
+    (picture.button "Help" \() = (s.open "Minesweeper help" help))
+    (picture.button "New Game" newGame)
+    picture.quitButton
+    (picture.border 3 3 (picture.stringRef "Click on a cell" setStatus)))
+   (picture.catchHit (picture.array2 sz gap display update) button))));

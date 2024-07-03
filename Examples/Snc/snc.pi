@@ -1,0 +1,746 @@
+{- Things to do:
+    - check on alphas and suns whether posix.2 regexp librariy exists
+    - get regexps working
+    - add -ignore flag and .sncignore files
+    - ask rsync folks to exit with nonzero status on error
+    - complain if an inode has more than one hard link to it, 
+      since in this case we might behave wrong
+    - do file installation by a link and a mv, not two mv's
+    - exactly what does the presence/date of .snc want to mean?
+
+    - get hostname like this...
+      > From a little more manpage reading, it looks like another approach
+      > might be to do gethostbyname("localhost") and check the h_name field
+      > of the result.
+      OTOH, looking up the name returned by uname ("nodename" field) 
+      and looking at the h_name field of that is a good bet.
+
+    - the Deadlock
+      - pass debug option along to server
+      - are there any places where unmarshalling something may involve
+        a communication on another chunnel (which may have to transmit 
+        over a full socket)?
+      - maybe some module is not threadsafe??
+      - try to flush socket buffers before we do a select
+
+    - type descriptors
+      - give TDs a separate describe field
+      - decide which version of TDs is better and fix one just one
+
+    - error reporting
+      - think about how low-level primitives should report errors
+        (and how to get the errno back from C before it's gotten
+         away)
+-}
+
+{-----------------------------------------------------------------------}
+
+import "Std/Io"
+import "Std/MD5"
+import "Posix/File"
+import "Posix/Fd"
+import "Posix/Args"
+import "Posix/Stat"
+import "Posix/Env"
+import "Remote"
+import "IOTD"
+import "Lazy"
+
+{-----------------------------------------------------------------------}
+
+def usage s =
+  ((inApplyList (cons > 
+    s
+    (+$ > "Usage: " (argv 0) " [options] patha pathb")
+    (+$ > "       " (argv 0) " [options] patha hostb pathb")
+    (+$ > "       " (argv 0) " [options] hosta patha hostb pathb")
+    "where options may include:"
+    "  -<preference>   how to update -- one of:"
+    "                    check      always print warning and skip"
+    "                    alwaysask  always request guidance"
+    "                    forcea     always choose a"
+    "                    forceb     always choose b"
+    "                    warn       if not sure, print warning and skip"
+    "                    ask        if not sure, request guidance"
+    "                    prefera    if not sure, choose a"
+    "                    preferb    if not sure, choose b"
+    "  -rsync n        use rsync to copy dirs and files >= n bytes"
+    "  -fast           skip unmodified subdirectories"
+    "  -verbose        print diagnostics during execution"
+    "  -file filename  synchronize a single file"
+    "  -port n         use local port n for socket communications"
+    "  -workers n      use n synchronization threads in parallel"
+    "  -debug          enable low-level tracing"
+    "  -help           print this message"
+    (nil)) prNL);
+   (exit 1);
+   ())
+
+val [intOpts stringOpts flags rest] =
+    (getOpts 
+     (cons> ["port" "port"] ["rsync" "rsync"] ["workers" "workers"] (nil))
+     (cons> ["file" "file"] (nil)) 
+     (cons> ["server" "server"] ["verbose" "verbose"] ["help" "help"] 
+            ["debug" "debug"] 
+            ["fast" "fast"] 
+            ["forcea" "forcea"] ["prefera" "prefera"] 
+            ["forceb" "forceb"] ["preferb" "preferb"] 
+            ["ask" "ask"] ["alwaysask" "alwaysask"] 
+            ["warn" "warn"] ["check" "check"] 
+            (nil)) 
+     usage)
+
+val rsynclimit = (try \(h) = (intOpts "rsync" h) \(_) = ~1)
+
+{-----------------------------------------------------------------------}
+
+def fileContents (path:String fail:(Handler String)) : ByteArray =
+  (val fstat = (stat path fail)
+   val sz = fstat.size
+   val ba = (makeByteArray (char.fromInt 0) sz)
+   val fd = (openRdFd path fail)
+   val r = if (== sz 0) then 0 else (readFdByteArray fd ba 0 sz)
+   (closeFd fd);
+   if (== sz r)
+     then ba
+     else (raise fail "fileContents: did not read whole file"))
+
+{-----------------------------------------------------------------------} 
+
+def thisHostName () = (getEnv "HOSTNAME" exitOnExn)
+val localhost = ""
+
+def thisUserName () = (getEnv "USER" exitOnExn)
+
+def dirplusfile (d f) =
+  if (==$ d ".") then f
+  else (+$ > d "/" f)
+
+{-----------------------------------------------------------------------}
+
+type RelativePath = String    {- Path relative to a filesystem root -}
+val relativePathTD : (TD RelativePath) = stringTD
+
+type FileAge = Int
+val oldFile : FileAge = 0
+val newFile : FileAge = 1
+val unknownAge : FileAge = 2
+
+type FileSystem = [
+  fileexists = ![RelativePath !Bool]
+
+  filetype = ![RelativePath (Handler String) !FileType]
+  filesize = ![RelativePath (Handler String) !Int]
+  filepermissions = ![RelativePath (Handler String) !Int]
+  signature = ![RelativePath (Handler String) !MD5Digest]
+
+  fileAge = ![RelativePath (Handler String) !FileAge]
+  allContentsOld = ![RelativePath (Handler String) !Bool]
+  markFilesOld = ![Sig]
+
+  delete = ![RelativePath (Handler String) Sig]
+
+  rdfile = ![RelativePath (Handler String) !Rd]
+  wrfile = ![RelativePath Int (Handler String) !Wr]
+
+  setPermissions = ![RelativePath Int (Handler String) Sig]
+
+  listDir = ![RelativePath (Handler String) !(List String)]
+  mkdir = ![RelativePath Int (Handler String) Sig]
+
+  host = String
+  root = String
+]
+
+{- The code using this would be cleaner if it didn't have to
+   pass the CM in as a parameter -- e.g., if each chun contained a
+   field that pointed to its CM.  This requires a pair of
+   mutually recursive types. -}
+def fileSystemTD (cm:ChunManager) : (TD FileSystem)
+= (val ochanTD = cm.ochanTD
+   val handlerOfStringTD = (ochanTD stringTD)
+   val wrTDcm = (wrTD cm)
+   val rdTDcm = (rdTD cm)
+   val fileexistsTD = (ochanTD (pairTD relativePathTD (ochanTD boolTD)))
+   val filetypeTD = (ochanTD (tripleTD relativePathTD handlerOfStringTD 
+                                      (ochanTD fileTypeTD)))
+   val filesizeTD = (ochanTD (tripleTD relativePathTD handlerOfStringTD 
+                                      (ochanTD intTD)))
+   val filepermissionsTD = (ochanTD (tripleTD relativePathTD handlerOfStringTD 
+                                             (ochanTD intTD)))
+   val signatureTD = (ochanTD (tripleTD relativePathTD handlerOfStringTD 
+                                       (ochanTD md5digestTD)))
+   val fileAgeTD = (ochanTD (tripleTD relativePathTD handlerOfStringTD 
+                                     (ochanTD intTD)))
+   val allContentsOldTD = (ochanTD (tripleTD relativePathTD handlerOfStringTD 
+                                             (ochanTD boolTD)))
+   val markFilesOldTD = (ochanTD (singletonTD (ochanTD unitTD)))
+   val deleteTD = (ochanTD (tripleTD relativePathTD handlerOfStringTD 
+                                     (ochanTD unitTD)))
+   val rdfileTD = (ochanTD (tripleTD relativePathTD handlerOfStringTD 
+                                     (ochanTD rdTDcm)))
+   val wrfileTD = (ochanTD (quadTD relativePathTD intTD handlerOfStringTD 
+                                  (ochanTD wrTDcm)))
+   val setPermissionsTD = (ochanTD (quadTD relativePathTD intTD
+                                  handlerOfStringTD (ochanTD unitTD)))
+   val listOfStringTD = (listTD stringTD)
+   val listDirTD = (ochanTD (tripleTD relativePathTD handlerOfStringTD 
+                                     (ochanTD listOfStringTD)))
+   val mkdirTD = (ochanTD (quadTD relativePathTD intTD
+                         handlerOfStringTD (ochanTD unitTD)))
+   (record
+    marshall = \(str:Wr fs:FileSystem) =
+     ((str.write "f");
+      (fileexistsTD.marshall str fs.fileexists);
+      (filetypeTD.marshall str fs.filetype);
+      (filesizeTD.marshall str fs.filesize);
+      (filepermissionsTD.marshall str fs.filepermissions);
+      (signatureTD.marshall str fs.signature);
+      (fileAgeTD.marshall str fs.fileAge);
+      (allContentsOldTD.marshall str fs.allContentsOld);
+      (markFilesOldTD.marshall str fs.markFilesOld);
+      (deleteTD.marshall str fs.delete);
+      (rdfileTD.marshall str fs.rdfile);
+      (wrfileTD.marshall str fs.wrfile);
+      (setPermissionsTD.marshall str fs.setPermissions);
+      (listDirTD.marshall str fs.listDir);
+      (mkdirTD.marshall str fs.mkdir);
+      (stringTD.marshall str fs.host);
+      (stringTD.marshall str fs.root);
+      [])
+      
+    unmarshall = \(str:Rd fail:(Handler String)) = 
+     (val tag = 'f'
+      (parseLiteralChar str tag fail);
+      (record
+       fileexists = (fileexistsTD.unmarshall str fail)
+       filetype = (filetypeTD.unmarshall str fail)
+       filesize = (filesizeTD.unmarshall str fail)
+       filepermissions = (filepermissionsTD.unmarshall str fail)
+       signature = (signatureTD.unmarshall str fail)
+       fileAge = (fileAgeTD.unmarshall str fail)
+       allContentsOld = (allContentsOldTD.unmarshall str fail)
+       markFilesOld = (markFilesOldTD.unmarshall str fail)
+       delete = (deleteTD.unmarshall str fail)
+       rdfile = (rdfileTD.unmarshall str fail)
+       wrfile = (wrfileTD.unmarshall str fail)
+       setPermissions = (setPermissionsTD.unmarshall str fail)
+       listDir = (listDirTD.unmarshall str fail)
+       mkdir = (mkdirTD.unmarshall str fail)
+       host = (stringTD.unmarshall str fail)
+       root = (stringTD.unmarshall str fail)
+      ))))
+
+val recentMarkerName : String = ".snc"
+
+def localFileSystem ([root:String thishost:String
+                      fail:(Handler String)]) : FileSystem =
+(val recentMarker = (+$ > root "/" recentMarkerName)
+ def rootplus (name) = (dirplusfile root name)
+
+ if (not (fileExists root)) then
+   (raise fail (+$ root " nonexistant"))
+ else if (val s = (stat root fail) (<> s.dev ISDIR)) then
+   (raise fail (+$ root " not a directory"))
+ else
+  (val recently = 
+    if (not (fileExists recentMarker)) then 0
+    else (val s = (stat recentMarker fail) s.mtime)
+  (record
+    fileexists = 
+      \(name:RelativePath) = 
+        (fileExists (rootplus name))
+
+    filetype = 
+      \(name:RelativePath fail:(Handler String)) = 
+        (val s = (stat (rootplus name) fail) s.dev)
+
+    filesize = 
+      \(name:RelativePath fail:(Handler String)) = 
+        (val s = (stat (rootplus name) fail) s.size)
+
+    filepermissions = 
+      \(name:RelativePath fail:(Handler String)) = 
+        (val s = (stat (rootplus name) fail) s.mode)
+
+    signature = 
+      \(name:RelativePath fail:(Handler String)) = 
+        (md5bytearray (fileContents (rootplus name) fail))
+
+    fileAge = 
+      \(name:RelativePath fail:(Handler String)) = 
+        if (== recently 0) then unknownAge
+        else if
+          (|| (>> (val s = (stat (rootplus name) fail) s.mtime) recently)
+              (>> (val s = (stat (rootplus name) fail) s.ctime) recently))
+        then newFile
+        else oldFile
+
+    allContentsOld = 
+      \(name:RelativePath fail:(Handler String)) = 
+        if (== recently 0) then false
+        else 
+          (def aco (n:RelativePath) =
+             (val s = (stat (rootplus n) fail)
+              if (&& (<= s.mtime recently)
+                     (<= s.ctime recently)) then
+                if (== s.dev ISDIR) then
+                  (acoAll n (listDir (rootplus n) fail))
+                else
+                  true
+              else
+                false)
+           and acoAll (n:RelativePath nl:(List RelativePath)) =
+             if (null nl) then true
+             else if (aco (+$ > n "/" (car nl))) then (acoAll n (cdr nl))
+             else false
+
+           (aco name))
+
+    markFilesOld = 
+      \() = (closeFd (openWrFd recentMarker fail))
+
+    delete = 
+      \(name:RelativePath fail:(Handler String)) : [] = 
+         (val fullname = (rootplus name)
+          val tmpname = (+$ > fullname ".deleted" (intString (getpid)) ".tmp")
+          (rename fullname tmpname fail))
+
+    rdfile = 
+      \(name:RelativePath fail:(Handler String)) = 
+        (openRd (rootplus name) fail)
+
+    wrfile = 
+      \(name:RelativePath perm:Int fail:(Handler String)) : Wr = 
+         (val fullname = (rootplus name)
+          val tmpname = (+$ > fullname ".tmp" (intString (getpid)) ".tmp")
+          val savename = (+$ > fullname ".old" (intString (getpid)) ".tmp")
+          val wr = (openGenWr tmpname true true true perm fail)
+          (wr with 
+             close = \() = 
+               ((wr.close);
+                (try \(h) = (rename fullname savename h)
+                     \(_) = []);
+                (rename tmpname fullname fail))
+          ))
+
+    setPermissions = 
+      \(name:RelativePath perm:Int fail:(Handler String)) = 
+        (chmod (rootplus name) perm fail)
+
+    listDir = 
+      \(name:RelativePath fail:(Handler String)) = 
+        (listDir (rootplus name) fail)
+
+    mkdir = 
+      \(name:RelativePath perm:Int fail:(Handler String)) = 
+        (mkdir (rootplus name) perm fail)
+
+    host = thishost
+    root = root
+  )))
+
+val port : Int = 
+  (try \(h) = (intOpts "port" h) \(_) = (+ userReservedPort 500))
+val cml : (Lazy ChunManager) = (lazy \() = (chunServer port exitOnExn))
+
+val fileSystemServerTD = (pairTD stringTD (chunTD stringTD))
+def remoteFileSystem (host:String root:String fail:(Handler String)) =
+  (val cm = (cml.get)
+   val f = (startRemoteServer fileSystemServerTD (fileSystemTD cm) cm
+            host "snc" fail)
+   val failc = (cm.ochanChun fail stringTD)
+   (f [root failc]))
+
+def fileSystem (host:String root:String fail:(Handler String)) =
+  if (==$ host localhost) then
+    (localFileSystem [root localhost fail])
+  else
+    (remoteFileSystem host root fail)
+
+{-----------------------------------------------------------------------}
+
+val verbose = (ref false)
+def trace (s) = if (verbose.deref) then (prNL s) else []
+
+val fast = (flags "fast")
+
+
+{-----------------------------------------------------------------------}
+
+{- A worker is passed two completion channels -- an ordinary result channel
+   and a special signal that it can use to indicate that is has finished
+   "early" and will not consume significant resources from now on, but
+   that it wishes to wait before actually terminating (for example, to
+   make sure that its subjobs have all terminated normally).  A new 
+   worker is allowed to start when either signal is used, but the call
+   to (worker body) only completes when body sends on its result channel.  
+-}
+type (Worker X) = ![Sig !X]
+
+  new w:^[]
+
+  def startWorkers (n:Int) : [] = (for 1 n \(_) = (write w []))
+
+  def worker [#X body:(Worker X) r:!X] = 
+    ((read w); 
+     new f:^[]
+     run f?[] = w![]
+     val res = (body f)
+     (f![] | r!res))
+
+def inApplyListPar (#X l:(List X) f:![X Sig]) : []
+= (val results = (inMapList l \(e) = (new r:^[]
+                                      run f![e r]
+                                      r))
+   (inApplyList results \(r) = (read r)))
+
+
+{-----------------------------------------------------------------------}
+
+def ignore (f:String) : Bool =
+  (def testsuff (s) = 
+     (val l = (sizeString s)
+      if (<< (sizeString f) l) 
+        then false
+        else (==$ s (subString f (- (sizeString f) l) l)))
+   (|| > (testsuff recentMarkerName)
+         (testsuff "~")
+         (testsuff ".tmp")))
+
+{-----------------------------------------------------------------------}
+
+val bufsize = 1024
+
+{- Belongs in Proc.src -}
+def interpretStatus (s:Status tag:String fail:(Handler String)) =
+ (def err (mesg) = (raise fail (+$ > "process " tag " " mesg))
+  if (exited s) then
+    if (== (exitStatus s) 0) then
+      []
+    else
+      (err (+$ "exited with status " (intString (exitStatus s))))
+  else
+    if (signalled s) then
+      (err "was terminated by signal")
+    else
+      (err "unknown termination status"))
+
+def localFS (fs:FileSystem) : Bool =
+  (==$ fs.host localhost)
+
+def rsyncpath (fs:FileSystem name:String) =
+  if (localFS fs) then
+    (+$ > fs.root "/" name)
+  else
+    (+$ > (thisUserName) "@" fs.host ":" fs.root "/" name)
+
+def rsync (a:FileSystem b:FileSystem name:String fail:(Handler String)) =
+  (val args = (cons > 
+                "rsync" 
+                "--verbose" "--recursive" "--checksum" "--perms"
+                "--compress" "--backup"
+                "--suffix" (+$ > ".old" (intString (getpid)) ".tmp")
+                (rsyncpath a name)
+                (rsyncpath b name)
+                (nil))
+   (trace (revFoldList args \(s1 s2) = (+$ > s1 " " s2) ""));
+   (interpretStatus 
+    (waitpid (exec "/homes/bcp1000/bin/alpha/rsync" args))
+    "rsync" fail))
+
+def copyFile (a:FileSystem b:FileSystem f:String fail:(Handler String)) =
+(worker \(_) = 
+  if (&& (>= rsynclimit 0) (>= (a.filesize f fail) rsynclimit)) then
+    (rsync a b f fail)
+  else
+    (val sz = (a.filesize f fail)
+     val perm = (a.filepermissions f fail)
+     val rd = (a.rdfile f fail)
+     val wr = (b.wrfile f perm fail)
+     val buf = (makeByteArray '\000' bufsize)
+     def c (n) = 
+       if (<= n 0) then [] else 
+         (val r = (rd.readByteArray buf 0 bufsize)
+          (wr.writeByteArray buf 0 r);
+          (c (- n r)))
+     (c sz);
+     (rd.close);
+     (wr.close)))
+
+def copy (a:FileSystem b:FileSystem 
+          file:RelativePath
+          fail:(Handler String))
+=
+  ((trace (+$ > "Copying " file ));
+   val ta = (a.filetype file fail)
+   if (== ta ISREG) then (copyFile a b file fail)
+   else if (== ta ISDIR) then (copyDir a b file fail)
+   else (raise fail (+$ "Don't know how to copy " file));
+   (trace (+$ > "Finished copying " file )))
+
+and copyDir (a:FileSystem b:FileSystem d:String fail:(Handler String)) =
+(worker \(done) = 
+  if (>= rsynclimit 0) then
+    (rsync a b d fail)
+  else
+    (val perm = (a.filepermissions d fail)
+     (b.mkdir d perm fail);
+     val files = (a.listDir d fail)
+     run done![]
+     (inApplyListPar files \(f) =
+        if (ignore f) then [] else (copy a b (dirplusfile d f) fail))))
+
+{------------------------------------------------------------------------}
+
+type Default = Int
+
+val atob = 0
+val btoa = 1
+val nodefault = 2
+
+def defaultString (default) =
+  if (== default atob) then "a->b preferred"
+  else if (== default btoa) then "b->a preferred"
+  else "no preferred direction"
+
+{------------------------------------------------------------------------}
+
+def display (f:String m:String) : String =
+  (+$ > f (makeString ' ' (- 50 (sizeString f))) m)
+
+def snc (a:FileSystem b:FileSystem 
+         file:RelativePath 
+         do:![String String ![Sig] String ![Sig] Default (Handler String) Sig]
+         fail:(Handler String)) 
+= 
+(worker \(done) = 
+  (def explain (s) = (+$ > file " " s)
+   val ea = (a.fileexists file)
+   val eb = (b.fileexists file)
+   if (&& (not ea) (not eb)) then 
+     (raise fail (+$ file " disappeared"))
+   else if (ignore file) then
+     (trace (+$ file " ignored"))
+   else 
+     if (not ea) then 
+      (val bage = (b.fileAge file fail)
+       val default = if (== bage newFile) then btoa
+                     else if (== bage oldFile) then atob
+                     else nodefault
+       (do (explain "exists only on b") 
+        "deleting from b" \() = (run done![] (b.delete file fail))
+        "copying b to a"  \() = (run done![] (copy b a file fail))
+        default fail))
+
+     else if (not eb) then 
+      (val aage = (a.fileAge file fail)
+       val default = if (== aage newFile) then atob
+                     else if (== aage oldFile) then btoa
+                     else nodefault
+       (do (explain "exists only on a") 
+        "copying a to b"  \() = (run done![] (copy a b file fail))
+        "deleting from a" \() = (run done![] (a.delete file fail))
+        default fail))
+
+     else
+      (val ta = (a.filetype file fail)
+       val tb = (b.filetype file fail)
+       if (<> ta tb) then 
+         (raise fail (explain "has different types on a and b")) else [];
+       val perma = (a.filepermissions file fail)
+       val permb = (b.filepermissions file fail)
+       val aage = (a.fileAge file fail)
+       val bage = (b.fileAge file fail)
+
+       def sncPermissions () = 
+         if (== perma permb) then 
+           []
+         else 
+           (val default = 
+              if (&& (== aage newFile) (== bage oldFile)) then atob
+              else if (&& (== aage oldFile) (== bage newFile)) then btoa
+              else nodefault
+            (do (explain "-- permission bits differ")
+              "copying a permissions to b" 
+               \() = (b.setPermissions file perma fail)
+              "copying b permissions to a" 
+               \() = (a.setPermissions file permb fail)
+             default fail))
+
+       if (== ta ISREG) then
+        (val asig = (a.signature file fail) 
+         val bsig = (b.signature file fail)
+         if (md5eq asig bsig) then
+           ((trace (explain "identical"));
+            (sncPermissions))
+         else
+          (val [default m] = 
+             if (&& (== aage newFile) (== bage newFile)) then
+               [nodefault "-- both copies have been modified"]
+             else if (&& (== aage oldFile) (== bage oldFile)) then
+               [nodefault "-- old files differ"]
+             else if (== aage newFile) then
+               [atob "modified on a"]
+             else
+               [btoa "modified on b"]
+           (do (explain m) 
+              "copying a to b" \() = (run done![] (copy a b file fail))
+              "copying b to a" \() = (run done![] (copy b a file fail))
+              default fail)))
+                            
+       else if (== ta ISDIR) then
+         (def doSubs () =
+           ((trace (explain "-- synchronizing contents"));
+            val afiles = (a.listDir file fail)
+            val bfiles = (b.listDir file fail)
+            val files = (sortList (appendList afiles bfiles) stringCmp true)
+            run done![]
+            (inApplyListPar files 
+                 \(f) = (snc a b (dirplusfile file f) do fail)))
+          (sncPermissions);
+          if fast then
+            (val aold = (lazy \() = (a.allContentsOld file fail))
+             val bold = (lazy \() = (b.allContentsOld file fail))
+             if (&& (aold.get) (bold.get)) then 
+               (trace (explain "-- all contents old: skipping"))
+             else 
+               (doSubs))
+          else (doSubs))
+       else if (== ta ISLNK) then
+         (raise fail (explain "-- can't handle symbolic links"))
+       else if (== ta ISOTHER) then
+         (raise fail (explain "unrecognized file type"))
+       else
+         (raise fail (explain "-- bad file type")))))
+
+{------------------------------------------------------------------------}
+
+val chooseforcea = 0
+val chooseprefera = 1
+val chooseforceb = 2
+val choosepreferb = 3
+val chooseask = 4
+val choosealwaysask = 5
+val choosewarn = 6
+val choosecheck = 7
+
+if (>> (+ > if (flags "forcea") then 1 else 0
+            if (flags "prefera") then 1 else 0
+            if (flags "forceb") then 1 else 0
+            if (flags "preferb") then 1 else 0
+            if (flags "ask") then 1 else 0
+            if (flags "alwaysask") then 1 else 0
+            if (flags "warn") then 1 else 0
+            if (flags "check") then 1 else 0)
+    1)
+  then (raise usage "choose just one of the conflict preference flags")
+  else [];
+
+val preference = 
+       if (flags "forcea") then chooseforcea
+  else if (flags "prefera") then chooseprefera
+  else if (flags "forceb") then chooseforceb
+  else if (flags "preferb") then choosepreferb
+  else if (flags "ask") then chooseask
+  else if (flags "alwaysask") then choosealwaysask
+  else if (flags "warn") then choosewarn
+  else if (flags "check") then choosecheck
+  else choosewarn
+
+val warnings = (ref false)
+
+def do (s ma thunka mb thunkb default fail) = 
+   {- If we've been told how to behave always, then do it... -}
+   if (== preference choosecheck) then
+     ((prNL (+$ > "Update required: " s)); (warnings.set true))
+   else if (== preference choosealwaysask) then
+     (raise fail "conflict preference 'alwaysask' not implemented")
+   else if (== preference chooseforcea) then
+     ((trace (+$ > s "   [" 
+              if (<> default atob) then "forcing " else ""
+              ma "]"));
+      (thunka))
+   else if (== preference chooseforceb) then
+     ((trace (+$ > s "   [" 
+              if (<> default btoa) then "forcing " else ""
+              mb "]"));
+      (thunkb))
+
+   {- Otherwise, if there's a preferred direction, do it... -}
+   else if (== default atob) then
+     ((trace (+$ > s "   [" ma "]"));
+      (thunka))
+   else if (== default btoa) then
+     ((trace (+$ > s "   [" mb "]"));
+      (thunkb))
+
+   {- Otherwise, do what we were told to do in the case of no preference -}
+   else if (== preference chooseprefera) then
+     ((trace (+$ > s "   [" ma " by preference]"));
+      (thunka))
+   else if (== preference choosepreferb) then
+     ((trace (+$ > s "   [" mb " by preference]"));
+      (thunkb))
+   else if (== preference choosewarn) then
+     ((prNL (+$ > "Warning: " s)); (warnings.set true))
+   else if (== preference choosealwaysask) then
+     (raise fail "update preference 'ask' not implemented")
+   else 
+     (raise fail "unknown update preference")
+
+
+{------------------------------------------------------------------------}
+
+run if (flags "server") then
+  (def body (cm:ChunManager) = 
+    [fileSystemServerTD (fileSystemTD cm)
+     \([root:String fail:(Chun String)]) : FileSystem =
+       (localFileSystem [root (thisHostName) (cm.chunOchan fail)])]
+   becomeServer![body exitOnExn])
+else (
+
+if (flags "help") then (raise usage "") else [];
+if (flags "verbose") then (verbose.set true) else [];
+if (flags "debug") then (debugging.set true) else [];
+
+val file = (try \(h) = (stringOpts "file" h) \(_) = ".")
+
+val workers = (try \(h) = (intOpts "workers" h) \(_) = 1)
+(startWorkers workers);
+
+val [hosta patha hostb pathb] = 
+  if (== (sizeList rest) 2) then 
+    ["" (nthList rest 0) "" (nthList rest 1)]
+  else if (== (sizeList rest) 3) then 
+    ["" (nthList rest 0) (nthList rest 1) (nthList rest 2)]
+  else if (== (sizeList rest) 4) then 
+    [(nthList rest 0) (nthList rest 1) (nthList rest 2) (nthList rest 3)]
+  else
+    (raise usage "")
+
+(trace (+$ > "Synchronizing " 
+             if (==$ file ".") then "" else (+$ > "file " file " ")
+             patha  
+             if (==$ hosta "") then "" else (+$ "@" hosta)
+             " and "
+             pathb  
+             if (==$ hostb "") then "" else (+$ "@" hostb)));
+
+val a = (fileSystem hosta patha exitOnExn)
+val b = (fileSystem hostb pathb exitOnExn)
+
+(snc a b file do exitOnExn);
+if (== preference choosecheck) then
+  []
+else if (warnings.deref) then
+  (trace "Warnings were generated; new files not being marked as old")
+else
+  ((a.markFilesOld);
+   (b.markFilesOld);
+   (trace "snc succeeded: new files now marked as old"));
+
+(exit 0);
+()
+)
+
